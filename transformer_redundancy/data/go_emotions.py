@@ -3,7 +3,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 from collections import defaultdict
 
-def get_emotions_loaders(batch_size: int=32, seed: int=0):    
+def get_go_emotions_loaders(batch_size: int=32, seed: int=0):    
 
     # Load GoEmotions dataset
     dataset_dict = load_dataset("go_emotions", "simplified")
@@ -20,3 +20,5 @@ def get_emotions_loaders(batch_size: int=32, seed: int=0):
         for batch_idx in range(num_batches):
             elements = _order[batch_size*batch_idx:batch_size*(1+batch_idx)]
             loaders[split].append(dataset_dict[split][elements])
+    
+    return loaders

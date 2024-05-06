@@ -1,4 +1,4 @@
-### CODE TAKEN FROM: https://colab.research.google.com/github/google-research/google-research/blob/master/representation_similarity/Demo.ipynb#scrollTo=MkucRi3yn7UJ ###
+### MOST CODE TAKEN FROM: https://colab.research.google.com/github/google-research/google-research/blob/master/representation_similarity/Demo.ipynb#scrollTo=MkucRi3yn7UJ ###
 
 import numpy as np
 
@@ -147,3 +147,10 @@ def feature_space_linear_cka(features_x, features_y, debiased=False):
         squared_norm_y, squared_norm_y, n))
 
   return dot_product_similarity / (normalization_x * normalization_y)
+
+
+def compute_cka_from_tensors(t1, t2, kernel_func: str):
+    if kernel_func == 'linear':
+        return cka(kernel_func(t1.flatten(1).cpu().numpy()), gram_linear(t2.flatten(1).cpu().numpy()))
+    elif kernel_func == 'rbf':
+        return cka(kernel_func(t1.flatten(1).cpu().numpy()), gram_rbf(t2.flatten(1).cpu().numpy()))

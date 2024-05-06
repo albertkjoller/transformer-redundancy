@@ -4,14 +4,13 @@ from transformers import AutoModelForImageClassification
 
 class DinoV2ForLayerwiseAnalysis(LayerWiseAnalysis):
       
-    def __init__(self, model_name: str, device='cuda', distilled: bool = False):
+    def __init__(self, model_name: str, device='cuda'):
         super().__init__()
 
         self.model_name = model_name
         self.device = device
         self.model, self.num_layers = self.load_model()
         self.model.eval()
-        self.features = {}
 
     def load_model(self):
         # Load pre-trained DeiT model
@@ -28,6 +27,8 @@ class DinoV2ForLayerwiseAnalysis(LayerWiseAnalysis):
         return hook
     
     def __register_hooks__(self, register_intermediate: bool = False):
+        self.features = {}
+
         # Register forward hooks
         layer_name = 0
         self._register_intermediate = register_intermediate
@@ -87,14 +88,6 @@ class DinoV2ForLayerwiseAnalysis(LayerWiseAnalysis):
                     # Add operation to operations
                     operations[i] = _layer
                     i += 1
-        
-        # __elements__ = {
-        #     '__embedding__': model.dinov2.embeddings,
-        #     '__encoder__': model.dinov2.encoder,
-        #     '__layernorm__': model.dinov2.layernorm,
-        #     '__concatenate__': lambda x: torch.cat([x[:, 0], x[:, 1:].mean(dim=1)], dim=1),
-        #     '__classifier__': model.classifier
-        # }
 
         # Pass through remaining layers
         z = self.model.dinov2.layernorm(z)
@@ -124,19 +117,3 @@ class DinoV2ForLayerwiseAnalysis(LayerWiseAnalysis):
             else:
                 __z = _op(__z)
         return __z
-
-
-    
-    # elif 'dinov2' in model_type:
-    #     # Load pre-trained DINOv2 model
-    #     model_type = model_type + '-imagenet1k-1-layer'
-    #     model = AutoModelForImageClassification.from_pretrained(model_type).to(device)
-    #     # Define number of layers
-    #     num_layers = len(model.dinov2.encoder.layer)
-    #     __elements__ = {
-    #         '__embedding__': model.dinov2.embeddings,
-    #         '__encoder__': model.dinov2.encoder,
-    #         '__layernorm__': model.dinov2.layernorm,
-    #         '__concatenate__': lambda x: torch.cat([x[:, 0], x[:, 1:].mean(dim=1)], dim=1),
-    #         '__classifier__': model.classifier
-    #     }

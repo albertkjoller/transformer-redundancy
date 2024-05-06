@@ -11,7 +11,6 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
         self.device = device
         self.model, self.num_layers = self.load_model()
         self.model.eval()
-        self.features = {}
 
     def load_model(self):
         # Load pre-trained DeiT model
@@ -33,6 +32,8 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
         return hook
     
     def __register_hooks__(self, register_intermediate: bool = False):
+        self.features = {}
+
         # Register forward hooks
         layer_name = 0
         self._register_intermediate = register_intermediate
