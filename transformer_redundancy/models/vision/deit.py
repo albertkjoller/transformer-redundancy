@@ -1,6 +1,6 @@
 import torch
 from ..layerwise import LayerWiseAnalysis
-from transformers import BeitForImageClassification, DeiTForImageClassificationWithTeacher, ViTForImageClassification
+from transformers import DeiTForImageClassificationWithTeacher, ViTForImageClassification
 
 class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
       
@@ -121,7 +121,7 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
 
         return z, operations, _z
     
-    def __get_output_from__(self, intermediates: torch.Tensor, operations: dict, **kwargs):
+    def __get_output_from__(self, intermediates: torch.Tensor, operations: dict):
         __z = intermediates
         # iterate through operations of the last part of the network 
         for i, _op in operations.items():
