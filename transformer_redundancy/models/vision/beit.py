@@ -4,7 +4,7 @@ from transformers import BeitForImageClassification
 
 class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
       
-    def __init__(self, model_name: str, device='cuda', hf_token: str = None):
+    def __init__(self, model_name: str, device='cuda'):
         super().__init__()
 
         self.model_name = model_name
@@ -28,7 +28,7 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
                 self.features[name] = output
         return hook
     
-    def __register_hooks__(self, features: dict = {}, register_intermediate: bool = False):
+    def __register_hooks__(self, register_intermediate: bool = False):
         # Register forward hooks
         layer_name = 0
         self._register_intermediate = register_intermediate
