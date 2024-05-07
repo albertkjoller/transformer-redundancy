@@ -1,6 +1,7 @@
 import torch
 from ..layerwise import LayerWiseAnalysis
 from transformers import DeiTForImageClassificationWithTeacher, ViTForImageClassification
+from copy import copy
 
 class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
       
@@ -11,6 +12,7 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
         self.device = device
         self.model, self.num_layers = self.load_model()
         self.model.eval()
+        self._hooks_registed = False
 
     def load_model(self):
         # Load pre-trained DeiT model
@@ -33,6 +35,7 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
     
     def __register_hooks__(self, register_intermediate: bool = False):
         self.features = {}
+        self._hooks_registed = True
 
         # Register forward hooks
         layer_name = 0
@@ -69,6 +72,8 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
         # Pass embeddings through encoder network
         for layer_idx, _layer in enumerate(_encoder.layer):
             if layer_idx == from_layer and within_block:
+                raise NotImplementedError("Within block mode is currently broken for DeiT model...")
+                
                 # Modified from: https://github.com/huggingface/transformers/blob/main/src/transformers/models/deit/modeling_deit.py (line 289-328)                
                     
                 self_attention_outputs = _layer.attention(_layer.layernorm_before(z))
@@ -84,8 +89,8 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
 
                 # Get intermediate representation for verification purposes
                 layer_output = _layer.output(layer_output, hidden_states) - hidden_states # workaround for dropout in ViTOutput class
-                _z = layer_output
-                
+                intermediates = layer_output 
+
                 # second residual connection is done here
                 layer_output = layer_output + hidden_states
                 z = ((layer_output,) + outputs)[0]
@@ -97,7 +102,7 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
             else: # between encoder blocks
                 # Get intermediate representation for verification purposes 
                 if layer_idx == from_layer:
-                    _z = z
+                    intermediates = z
 
                 z = _layer(z)[0]
                 if layer_idx >= from_layer:
@@ -113,20 +118,21 @@ class DeiTForLayerwiseAnalysis(LayerWiseAnalysis):
         operations[i+1] = lambda x: _classifier(x[:, 0, :])
 
         _orig_outputs = self.model(**inputs).cls_logits if 'distilled' in self.model_name else self.model(**inputs).logits
-        assert torch.allclose(_orig_outputs, self.__get_output_from__(_z, operations)), "Encoder block decomposition is incorrect..."
+        assert torch.allclose(_orig_outputs, self.__get_output_from__(intermediates, operations)), "Encoder block decomposition is incorrect..."
         assert torch.allclose(_orig_outputs, z), "Full model decomposition is incorrect..."
 
-        # Move features to CPU
-        for i, (k, v) in enumerate(self.features.items()):
-            self.features[k] = v[0].to('cpu') if not self._register_intermediate or int(k[5:]) % 2 == 1 else v.detach().to('cpu')
+        if self._hooks_registed:
+            # Move features to CPU
+            for i, (k, v) in enumerate(self.features.items()):
+                self.features[k] = v[0].to('cpu') if not self._register_intermediate or int(k[5:]) % 2 == 1 else v.detach().to('cpu')
 
-        return z, operations, _z
+        return operations, intermediates, {}
     
     def __get_output_from__(self, intermediates: torch.Tensor, operations: dict):
         __z = intermediates
         # iterate through operations of the last part of the network 
         for i, _op in operations.items():
-            if _op.__class__.__name__.lower() in ['vitlayer', 'deitlayer'] or i == 0: 
+            if _op.__class__.__name__.lower() in ['vitlayer', 'deitlayer'] or i == 0:
                 __z = _op(__z)[0]
             else:
                 __z = _op(__z)

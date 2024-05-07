@@ -11,6 +11,7 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
         self.device = device
         self.model, self.num_layers = self.load_model()
         self.model.eval()
+        self._hooks_registed = False
 
     def load_model(self):
         # Load pre-trained BEiT model
@@ -29,6 +30,7 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
     
     def __register_hooks__(self, register_intermediate: bool = False):
         self.features = {}
+        self._hooks_registed = True
 
         # Register forward hooks
         layer_name = 0
@@ -51,6 +53,8 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
         # Pass embeddings through encoder network
         for layer_idx, _layer in enumerate(self.model.beit.encoder.layer):
             if layer_idx == from_layer and within_block:
+                raise NotImplementedError("Within block mode is currently broken for BEiT model...")
+
                 # Modified from: https://github.com/huggingface/transformers/blob/main/src/transformers/models/beit/modeling_beit.py (line 415-445)                
                 self_attention_outputs = _layer.attention(_layer.layernorm_before(z))
                 attention_output = self_attention_outputs[0]
@@ -72,8 +76,8 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
                     layer_output = _layer.lambda_2 * layer_output
 
                 # Get intermediate representation for verification purposes
-                _z = layer_output[0]
-
+                intermediates = layer_output[0]
+                
                 # second residual connection
                 layer_output = _layer.drop_path(layer_output) + hidden_states
                 z = ((layer_output,) + outputs)[0]
@@ -85,7 +89,7 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
             else: # between encoder blocks
                 # Get intermediate representation for verification purposes 
                 if layer_idx == from_layer:
-                    _z = z
+                    intermediates = z
 
                 z = _layer(z)[0]
                 if layer_idx >= from_layer:
@@ -103,14 +107,15 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
         operations[i+2] = self.model.classifier
 
         _orig_outputs = self.model(**inputs).logits
-        assert torch.allclose(_orig_outputs, self.__get_output_from__(_z, operations)), "Encoder block decomposition is incorrect..."
+        assert torch.allclose(_orig_outputs, self.__get_output_from__(intermediates, operations)), "Encoder block decomposition is incorrect..."
         assert torch.allclose(_orig_outputs, z), "Full model decomposition is incorrect..."
 
-        # Move features to CPU
-        for i, (k, v) in enumerate(self.features.items()):
-            self.features[k] = v[0].to('cpu') if not self._register_intermediate or int(k[5:]) % 2 == 1 else v.detach().to('cpu')
+        if self._hooks_registed:
+            # Move features to CPU
+            for i, (k, v) in enumerate(self.features.items()):
+                self.features[k] = v[0].to('cpu') if not self._register_intermediate or int(k[5:]) % 2 == 1 else v.detach().to('cpu')
 
-        return z, operations, _z
+        return operations, intermediates, {}
     
     def __get_output_from__(self, intermediates: dict, operations: dict):
         __z = intermediates

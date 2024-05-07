@@ -8,4 +8,5 @@ def extract_features(inputs, analyzer: LayerWiseAnalysis, register_intermediate:
     
     # Extract features
     features = analyzer.features
+    analyzer.features = {}
     return features, features.keys().__len__()

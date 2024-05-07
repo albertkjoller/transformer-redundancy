@@ -1,5 +1,6 @@
 ### MOST CODE TAKEN FROM: https://colab.research.google.com/github/google-research/google-research/blob/master/representation_similarity/Demo.ipynb#scrollTo=MkucRi3yn7UJ ###
 
+import torch
 import numpy as np
 
 def gram_linear(x):
@@ -151,6 +152,7 @@ def feature_space_linear_cka(features_x, features_y, debiased=False):
 
 def compute_cka_from_tensors(t1, t2, kernel_func: str):
     if kernel_func == 'linear':
-        return cka(kernel_func(t1.flatten(1).cpu().numpy()), gram_linear(t2.flatten(1).cpu().numpy()))
+        sim_ = cka(gram_linear(t1.flatten(1).cpu().numpy()), gram_linear(t2.flatten(1).cpu().numpy()))
     elif kernel_func == 'rbf':
-        return cka(kernel_func(t1.flatten(1).cpu().numpy()), gram_rbf(t2.flatten(1).cpu().numpy()))
+        sim_ = cka(gram_rbf(t1.flatten(1).cpu().numpy()), gram_rbf(t2.flatten(1).cpu().numpy()))
+    return torch.tensor(sim_)

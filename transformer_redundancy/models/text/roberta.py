@@ -12,6 +12,7 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
         self.device = device
         self.pipeline, self.num_layers = self.load_model()
         self.pipeline.model.eval()
+        self._hooks_registed = False
 
     def load_model(self):
         # Load pre-trained RoBERTa model
@@ -29,6 +30,7 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
     
     def __register_hooks__(self, register_intermediate: bool = False):
         self.features = defaultdict(list)
+        self._hooks_registed = True
 
         # Register forward hooks
         layer_name = 0
@@ -99,10 +101,11 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
         # Stack outputs
         zs = torch.stack(zs).squeeze(1)
 
-        # Move features to CPU
-        _features = {}
-        for i, (k, v) in enumerate(self.features.items()):
-            _features[k] = torch.stack(v).squeeze(1).to('cpu')
+        if self._hooks_registed:
+            # Move features to CPU
+            _features = {}
+            for i, (k, v) in enumerate(self.features.items()):
+                _features[k] = torch.stack(v).squeeze(1).to('cpu')
         
         # Verify decomposition against most likely label
         _orig_outputs = [self.pipeline.model(self.pipeline.preprocess({'text': _input})['input_ids'].to(self.device)).logits for _input in inputs]
@@ -115,9 +118,12 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
             # assert torch.allclose(_orig_outputs, self.__get_output_from__(_zs, operations, attention_outputs=_as, within_block=within_block).max(dim=1)[0]), "Encoder block decomposition is incorrect..." 
         assert torch.allclose(_orig_outputs, zs.max(dim=1)[0]), "Full model decomposition is incorrect..."
         
-        # Overwrite features
-        self.features = _features
-        return zs, operations, _zs
+        if self._hooks_registed:
+            # Overwrite features
+            self.features = _features
+
+        extra = {'attention_outputs': _as}
+        return operations, _zs, extra
     
     def __get_output_from__(self, intermediates: torch.Tensor, operations: dict, attention_outputs: list = None):
         self.features = defaultdict(list) # Reset features
@@ -135,52 +141,3 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
                     __z = _op(__z)
             outputs.append(__z)
         return torch.stack(outputs).squeeze(dim=1)
-
-
-
-# def __verify_encoder_decomp__(_z, __z, operations):
-#     # Check if approaches result in different outputs
-#     for i, _op in operations.items():
-#         __z = _op(__z)[0]
-#     assert torch.allclose(__z, _z), "Encoder decomposition is incorrect..."
-#     return __z
-
-# def __verify_model_decomp__(inputs, __z, _post_operations, operations):
-#     # Add last layers in order to get logits
-#     for _i, _post_op in _post_operations.items():
-#         operations[_i] = _post_op
-#         __z = _post_op(__z)
-
-#     # assert torch.allclose(model(**inputs).logits, __z, atol=1e-4), "Full model decomposition is incorrect..."
-#     return operations
-
-# def __get_intermediate__(inputs, __elements__, from_layer):
-#     i = 0
-#     operations, _post_operations = {}, {}
-#     z = inputs # inputs['pixel_values']
-#     for k, arch in __elements__.items():
-#         if k == '__embedding__':
-#             z = arch(z)
-#         elif k == '__encoder__':
-#             for layer_idx, layer in enumerate(__elements__['__encoder__'].layer):
-#                 if layer_idx < from_layer:
-#                     z = layer(z)[0] # intermediate representation
-#                 else:
-#                     _z = layer(z if layer_idx == from_layer else _z)[0] # for checking if outputs are equal
-#                     operations[i] = layer
-#                     i += 1   
-#         else:
-#             _post_operations[i] = arch
-#             i += 1
-    
-#     # Check if approaches result in different outputs
-#     __z = __verify_encoder_decomp__(_z, z, operations)
-#     operations = __verify_model_decomp__(inputs, __z, _post_operations, operations)
-#     # Return intermediate representation at layer 'from_layer' and the remaining part of the network
-#     return z, operations
-
-# def __output__(intermediate_rep, operations):
-#     __z = intermediate_rep
-#     for i, _op in operations.items():
-#         __z = _op(__z)[0] if 'layer' in _op.__class__.__name__.lower() and 'layernorm' not in _op.__class__.__name__.lower() else _op(__z)
-#     return __z
