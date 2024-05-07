@@ -1,0 +1,33 @@
+### Notes:
+# If having memory issues when running the Jacobian experiments, one should adjust the 
+# "--jacobian-chunk-size" flag. Additionally, for vision models running on imagenet-1k
+# one can adjust the number of classes processed (mini-batch), adjusting "--c-per-iter".
+
+
+## GENERAL COMMANDS ##
+
+# CKA similarities
+python run.py cka-similarity --batch-size 128 --max-iter 5 --device cuda --save-path SAVE_PATH
+
+
+# Jacobian similarities
+python run.py jacobian-similarity --jacobian-between-layers --jacobian-chunk-size 10 --batch-size 32 --max-iter 5 --device cuda --save-path SAVE_PATH 
+
+## VISION TRANSFORMERS ##
+# Note: "--jacobian-chunk-size" is adjusted for fitting in memory...
+1) --jacobian-chunk-size 1 --c-per-iter 10 --dataset-name imagenet-1k --model-name MODEL_NAME --processor-name PROCESSOR_NAME
+
+## TEXT TRANSFORMERS ##
+# Jacobian between layers
+--dataset-name go-emotions --model-name MODEL_NAME
+# Jacobian from within block (before residual connections)
+--dataset-name go-emotions --model-name MODEL_NAME --within-block
+
+
+## AUDIO TRANSFORMER ##
+# Full model:
+--dataset-name speech_commands --model-folder PRETRAINED_MODEL_DIR --model-name MODEL_NAME
+# Pruned model:
+--dataset-name speech_commands --model-folder PRETRAINED_MODEL_DIR --model-name MODEL_NAME --pruned
+
+

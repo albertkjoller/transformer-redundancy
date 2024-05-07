@@ -2,21 +2,21 @@ import torch
 from transformer_redundancy.data import *
 from transformer_redundancy.models.vision import *
 from transformer_redundancy.models.text import *
-from transformer_redundancy.methods.utils import extract_features
+from transformer_redundancy.models.audio import *
+from transformer_redundancy.methods.utils import extract_features, __compute_jacobian__
 from transformer_redundancy.methods.cka import compute_cka_from_tensors
 
 def get_domain(args):
     if args.dataset_name in ['imagenet-1k']:
-        domain = 'vision'
+        return 'vision'
     elif args.dataset_name in ['go_emotions']:
-        domain = 'text'
+        return 'text'
     elif args.dataset_name in ['coco']:
-        domain = 'multimodal'
-    # elif args.datset_name in ['audio']:
-    #     domain = 'audio'
+        return 'multimodal'
+    elif args.dataset_name in ['speech_commands']:
+        return 'audio'
     else:
         raise ValueError(f"Dataset {args.dataset_name} not recognized.")
-    return domain
 
 def get_analyzer(args):
     if 'deit' in args.model_name:
@@ -30,53 +30,9 @@ def get_analyzer(args):
     elif 'clip' in args.model_name:
         raise NotImplementedError("CLIP models not supported.")
         # return CLIPForLayerwiseAnalysis(args.model_name, device=args.device)
-    elif 'wav2vec' in args.model_name:
-        raise NotImplementedError("Wav2Vec models not supported.")
-        # return Wav2VecForLayerwiseAnalysis(args.model_name, device=args.device)    
-
-
-def __compute_jacobian__(self, intermediates: dict, operations: dict, **kwargs):
-
-
-    if kwargs['dataset_name'] == 'imagenet-1k':
-        num_classes = 1000
-
-        # Prepare saving structure
-        Js = torch.zeros((kwargs['batch_size'], intermediates.shape[1] * intermediates.shape[2] * num_classes))
-        for _idx, _z in enumerate(intermediates):
-            
-            _Js = []
-            for i in range(num_classes // kwargs['c_per_iter']):
-                kwargs['pbar'].set_description(f"Iteration {kwargs['current_iteration']}/{kwargs['max_iter']}: Transformer layer {kwargs['k']+1}/{self.num_layers} ==> Processing {_idx+1}/{kwargs['batch_size']} batch idx (class {kwargs['c_per_iter']*(i+1)}/{num_classes})")
-                
-                # Define function 
-                _func = lambda x: self.__get_output_from__(x.unsqueeze(0), operations)[:, i*kwargs['c_per_iter']:(i+1)*kwargs['c_per_iter']]
-                # Compute Jacobian per input
-                J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z.unsqueeze(0))
-                _Js.append(J.cpu().squeeze([0,1]).flatten(1))
-                torch.cuda.empty_cache()
-
-            Js[_idx] = torch.stack(_Js).flatten().unsqueeze(0)
-        return Js
+    elif 'wav2vec2' in args.model_name:
+        return Wav2VecForLayerwiseAnalysis(args.model_name, model_folder=args.model_folder, pruned=args.pruned, device=args.device)
     
-    elif kwargs['dataset_name'] == 'go_emotions':
-        num_classes = 28
-        
-        _Js = []
-        for _idx, z in enumerate(intermediates):
-            if kwargs['within_block']:
-                J = torch.vmap(torch.func.jacrev(lambda x: analyzer.__get_output_from__(x.unsqueeze(0).unsqueeze(0), operations, attention_outputs=kwargs['info']['attention_outputs'][_idx])), chunk_size=kwargs['jacobian_chunk_size'])(z)
-            else:
-                J = torch.vmap(torch.func.jacrev(lambda x: analyzer.__get_output_from__(x.unsqueeze(0).unsqueeze(0), operations)), chunk_size=kwargs['jacobian_chunk_size'])(z)
-            _Js.append(J.cpu().squeeze([0,1]).mean(dim=1))
-            torch.cuda.empty_cache()
-        Js = torch.stack(_Js).flatten(1)
-        return Js
-
-    else:
-        raise NotImplementedError(f"Dataset {kwargs['dataset_name']} is not supported yet...")
-
-
 
 if __name__ == '__main__':
     
@@ -97,11 +53,13 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--save-path', type=str, default='../experiments', help='Directory to save the bsub files.')
     ### Data parameters ###
-    parser.add_argument('--dataset-name', type=str, choices=['coco', 'imagenet-1k', 'go_emotions'])
+    parser.add_argument('--dataset-name', type=str, choices=['coco', 'imagenet-1k', 'go_emotions', 'speech_commands'])
     parser.add_argument('--processor-name', type=str)
     parser.add_argument('--batch-size', type=int, default=128)
     ### Model parameters ###
     parser.add_argument('--model-name', type=str)
+    parser.add_argument('--model-folder', type=str)
+    parser.add_argument('--pruned', action='store_true')
     parser.add_argument('--distilled', action='store_true')
     parser.add_argument('--device', type=str, choices=['cpu', 'cuda'])
     # Parse arguments
@@ -139,10 +97,14 @@ if __name__ == '__main__':
                 inputs = {'pixel_values': batch[0].to(args.device)}
             elif args.dataset_name == 'go_emotions':
                 inputs = batch["text"]
+            elif args.dataset_name == 'speech_commands':
+                inputs = batch["input_values"].to(args.device)
             # elif args.dataset_name == 'coco':
             #     inputs = batch[0].to(args.device)
 
             if 'cka-similarity' in args.mode:
+                pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing CKA similarities...") # set pbar description
+
                 # Extract intermediate features (within and between transformer encoder blocks)
                 features, n_feature_layers = extract_features(inputs, analyzer)
 
@@ -157,10 +119,12 @@ if __name__ == '__main__':
             if 'jacobian-similarity' in args.mode:
                 jacobians, jacobian_similarities_batch = {}, {}
                 for k in range(analyzer.num_layers):
+                    base_desc = f"Iteration {current_iteration}/{args.max_iter}: Transformer layer {k+1}/{analyzer.num_layers} ==> " # set pbar description
+
                     # Get intermediate representations, operations and intermediates (+ features)
                     operations, intermediates, info = analyzer.__element_wise_breakdown__(inputs, from_layer=k, within_block=args.within_block)
                     # Compute Jacobian for each data point in the batch
-                    J = __compute_jacobian__(analyzer, intermediates=intermediates, operations=operations, pbar=pbar, current_iteration=current_iteration, k=k, info=info, **args.__dict__)
+                    J = __compute_jacobian__(analyzer, intermediates=intermediates, operations=operations, pbar=pbar, current_iteration=current_iteration, k=k, info=info, base_desc=base_desc, **args.__dict__)
                     
                     # Store Jacobians for computing similarities between layers
                     if args.jacobian_between_layers:
@@ -169,8 +133,8 @@ if __name__ == '__main__':
                     # Compute similarities between Jacobians across the batch
                     _batch_sim_output = torch.ones((args.batch_size, args.batch_size))
                     for i in range(args.batch_size):
-                        # Set description
-                        pbar.set_description(f'Iteration {current_iteration}/{args.max_iter}: Transformer layer {k+1}/{analyzer.num_layers} ==> Similarity of {i+1}/{args.batch_size}')
+                        pbar.set_description(base_desc + f"Similarity of {i+1}/{args.batch_size}") # update pbar info
+
                         # Compute pairwise cosine similarity between Jacobians of different data points
                         for j in range(i+1, args.batch_size):
                             _batch_sim_output[i,j] = _batch_sim_output[j,i] = torch.nn.functional.cosine_similarity(J[i].to(args.device).flatten(), J[j].to(args.device).flatten(), dim=0).item()
@@ -183,7 +147,7 @@ if __name__ == '__main__':
                     layer_similarities = torch.ones((args.batch_size, analyzer.num_layers, analyzer.num_layers))
                     for _data_idx in range(args.batch_size):
                         # Set description
-                        pbar.set_description(f'Iteration {current_iteration}/{args.max_iter}: Transformer layer {k+1}/{analyzer.num_layers} ==> Similarity of layer {i+1}/{analyzer.num_layers} (data point {_data_idx+1}/{args.batch_size})')
+                        pbar.set_description(f"Similarity of layer {i+1}/{analyzer.num_layers} (data point {_data_idx+1}/{args.batch_size})")
                         for i in range(jacobians.keys().__len__()):
                             # Compute pairwise cosine similarity between Jacobians of different data points
                             for j in range(i+1, jacobians.keys().__len__()):
@@ -197,5 +161,5 @@ if __name__ == '__main__':
                 break
             current_iteration += 1
 
-    os.makedirs(args.save_path, exist_ok=True)
-    torch.save(results, os.path.join(args.save_path, f'{domain}_{args.model_name.split("/")[-1]}_{args.mode}_results.pth'))
+    os.makedirs(f"{args.save_path}/{domain}", exist_ok=True)
+    torch.save(results, f'{args.save_path}/{domain}/{args.model_name.split("/")[-1]}_within={args.within_block}_{args.mode}_results.pth')
