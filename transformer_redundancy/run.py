@@ -45,10 +45,11 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run Visual Transformer experiments.')
     ### Experiment parameters ###
-    parser.add_argument('mode', type=str, nargs='+', choices=['cosine-similarity', 'cka-similarity', 'jacobian-similarity'])
+    parser.add_argument('mode', type=str, nargs='+', choices=['cosine-similarity', 'cka-similarity', 'jacobian-similarity', 'block-inference'])
     parser.add_argument('--within-block', action='store_true')
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
+    parser.add_argument('--prune-by-block-inference', action='store_true')
     parser.add_argument('--c-per-iter', type=int, default=20)
     parser.add_argument('--max-iter', type=int, default=100)
     parser.add_argument('--seed', type=int, default=0)
@@ -87,6 +88,7 @@ if __name__ == '__main__':
     results = {
         'all-cosine-similarities': [],
         'all-cka-similarities': [],
+        'all-block-inferences': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
     }
@@ -104,11 +106,29 @@ if __name__ == '__main__':
             # elif args.dataset_name == 'coco':
             #     inputs = batch[0].to(args.device)
 
-            if 'cosine-similarity' in args.mode or 'cka-similarity' in args.mode:
+
+            if any([_m in ['cosine-similarity', 'cka-similarity', 'block-inference'] for _m in args.mode]):
                 pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing feature similarities...") # set pbar description
 
                 # Extract intermediate features (within and between transformer encoder blocks)
                 features, n_feature_layers = extract_features(inputs, analyzer)
+
+                # Compute block inference scores
+                if 'block-inference' in args.mode:
+                    features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers)[1::2])}
+
+                    bi_scores = torch.zeros((args.batch_size, analyzer.num_layers - 1))
+                    for layer_i in range(analyzer.num_layers - 1):
+                        # Compute elements of block inference scores                        
+                        dot_prod = torch.einsum('id,id->i', features_between_blocks[layer_i].flatten(1), features_between_blocks[layer_i+1].flatten(1))
+                        norm_before = torch.linalg.norm(features_between_blocks[layer_i].flatten(1), ord=2, dim=1)
+                        norm_after = torch.linalg.norm(features_between_blocks[layer_i+1].flatten(1), ord=2, dim=1)
+
+                        # Compute block inference scores
+                        bi_scores[:, layer_i] = 1 - dot_prod / (norm_before * norm_after)
+                    
+                    # Store block inference scores
+                    results['all-block-inferences'].append(bi_scores)
 
                 # Compute similarities between intermediate features and input
                 cos_similarities = torch.zeros((n_feature_layers, n_feature_layers))
