@@ -6,8 +6,8 @@
 
 ## GENERAL COMMANDS ##
 
-# CKA similarities
-python run.py cka-similarity --batch-size 128 --max-iter 5 --device cuda --save-path SAVE_PATH
+# CKA and cosine feature similarities
+python run.py cosine-similarity cka-similarity --batch-size 128 --max-iter 5 --device cuda --save-path SAVE_PATH
 
 
 # Jacobian similarities
@@ -29,5 +29,5 @@ python run.py jacobian-similarity --jacobian-between-layers --jacobian-chunk-siz
 --dataset-name speech_commands --model-folder PRETRAINED_MODEL_DIR --model-name MODEL_NAME
 # Pruned model:
 --dataset-name speech_commands --model-folder PRETRAINED_MODEL_DIR --model-name MODEL_NAME --pruned
-
-
+# Pre-trained:
+--dataset-name speech_commands --model-name MODEL_NAME

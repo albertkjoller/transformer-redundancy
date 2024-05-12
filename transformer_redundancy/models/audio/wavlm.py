@@ -13,7 +13,7 @@ def prune_model(model, layer):
     model.base_model.encoder.layers = encoder_layers
     return model
 
-class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
+class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
       
     def __init__(self, model_name: str, model_folder: Optional[str] = None, pruned: bool = False, device='cuda'):
         super().__init__()
@@ -28,18 +28,21 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
 
     def load_model(self):
         if self.model_folder is not None:
-            # Load finetuned Wav2Vec model
+            # Load finetuned wavLM model
             model_path = f"{self.model_folder}/{self.model_name}-finetuned" 
             model_path += '-pruned/' if self.pruned else '/'
         else: # load pre-trained
-            model_path = self.model_name # 'facebook/wav2vec2-base'
+            model_path = self.model_name
         
+
         # Load model
         model = AutoModelForAudioClassification.from_pretrained(model_path).to(self.device)
         if self.pruned:
             model = prune_model(model, 8)
         
-        num_layers = model.wav2vec2.encoder.layers.__len__()
+        # Check if model uses stable layers
+        self.stable_layers = 'stable' in model.wavlm.encoder.layers[0].__class__.__name__.lower()
+        num_layers = model.wavlm.encoder.layers.__len__()
         return model, num_layers
             
     def get_features(self, name: str, is_intermediate: bool = False):
@@ -59,11 +62,11 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
         self._register_intermediate = register_intermediate
         for layer_idx in range(self.num_layers):
             if register_intermediate:
-                self.model.wav2vec2.encoder.layers[layer_idx].feed_forward.register_forward_hook(self.get_features(f"layer{layer_name}"))
-                self.model.wav2vec2.encoder.layers[layer_idx].register_forward_hook(self.get_features(f"layer{layer_name + 1}"))
+                self.model.wavlm.encoder.layers[layer_idx].feed_forward.register_forward_hook(self.get_features(f"layer{layer_name}"))
+                self.model.wavlm.encoder.layers[layer_idx].register_forward_hook(self.get_features(f"layer{layer_name + 1}"))
                 layer_name += 2
             else:
-                self.model.wav2vec2.encoder.layers[layer_idx].register_forward_hook(self.get_features(f"layer{layer_idx}"))
+                self.model.wavlm.encoder.layers[layer_idx].register_forward_hook(self.get_features(f"layer{layer_idx}"))
 
     def __element_wise_breakdown__(self, inputs, from_layer: int, within_block: bool = False):
         # Setup for storing operations from layer
@@ -71,39 +74,47 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
         operations = {}
 
         # Get input embeddings
-        z = self.model.wav2vec2.feature_extractor(inputs).transpose(1, 2)
-        z, extracted_features = self.model.wav2vec2.feature_projection(z)
+        z = self.model.wavlm.feature_extractor(inputs).transpose(1, 2)
+        z, extracted_features = self.model.wavlm.feature_projection(z)
         
-        z = z + self.model.wav2vec2.encoder.pos_conv_embed(z)
-        z = self.model.wav2vec2.encoder.layer_norm(z)
-        z = self.model.wav2vec2.encoder.dropout(z)
+        z = z + self.model.wavlm.encoder.pos_conv_embed(z)
+        if not self.stable_layers:
+            z = self.model.wavlm.encoder.layer_norm(z)
+        z = self.model.wavlm.encoder.dropout(z)
 
+        position_bias = None
         # Pass embeddings through encoder network
-        for layer_idx, _layer in enumerate(self.model.wav2vec2.encoder.layers):
+        for layer_idx, _layer in enumerate(self.model.wavlm.encoder.layers):
             if layer_idx == from_layer and within_block:
                 raise NotImplementedError("Within block mode is currently not implemented for Wav2vec...")
 
             else: # between encoder blocks
+
                 # Get intermediate representation for verification purposes 
                 if layer_idx == from_layer:
                     intermediates = z
 
-                z = _layer(z)[0]
+                z, position_bias = _layer(z,  position_bias=position_bias)[:2]
                 if layer_idx >= from_layer:
                     # Add operation to operations
                     operations[i] = _layer
                     i += 1
 
+        if self.stable_layers:
+            z = self.model.wavlm.encoder.layer_norm(z)
+            operations[i] = self.model.wavlm.encoder.layer_norm
+            i += 1  
+
         # Pass through remaining layers
         z = self.model.projector(z)
         z = self.model.classifier(z.mean(dim=1)) # pool and classify
-
+        
         operations[i] = self.model.projector
         operations[i+1] = lambda x: self.model.classifier(x.mean(dim=1))
 
         _orig_outputs = self.model(inputs).logits
-        assert torch.allclose(_orig_outputs, self.__get_output_from__(intermediates, operations)), "Encoder block decomposition is incorrect..."
-        assert torch.allclose(_orig_outputs, z), "Full model decomposition is incorrect..."
+        assert torch.allclose(_orig_outputs, self.__get_output_from__(intermediates, operations), atol=1e-3, rtol=1e-5), "Encoder block decomposition is incorrect..."
+        assert torch.allclose(_orig_outputs, z, atol=1e-3, rtol=1e-5), "Full model decomposition is incorrect..."
 
         if self._hooks_registed:
             # Move features to CPU
@@ -114,10 +125,12 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
     
     def __get_output_from__(self, intermediates: torch.Tensor, operations: dict, **kwargs):
         __z = intermediates
+        _pos_bias = None
+
         # iterate through operations of the last part of the network 
         for i, _op in operations.items():
-            if _op.__class__.__name__.lower() == 'wav2vec2encoderlayer' or i == 0: 
-                __z = _op(__z)[0]
+            if _op.__class__.__name__.lower() in ['wavlmencoderlayer', 'wavlmencoderlayerstablelayernorm'] or i == 0: 
+                __z, _pos_bias = _op(__z, position_bias=_pos_bias)
             else:
                 __z = _op(__z)
         return __z

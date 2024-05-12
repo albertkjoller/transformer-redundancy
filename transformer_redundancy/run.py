@@ -32,7 +32,8 @@ def get_analyzer(args):
         # return CLIPForLayerwiseAnalysis(args.model_name, device=args.device)
     elif 'wav2vec2' in args.model_name:
         return Wav2VecForLayerwiseAnalysis(args.model_name, model_folder=args.model_folder, pruned=args.pruned, device=args.device)
-    
+    elif 'wavlm' in args.model_name.lower():
+        return WavLMForLayerwiseAnalysis(args.model_name, model_folder=args.model_folder, pruned=args.pruned, device=args.device)
 
 if __name__ == '__main__':
     
@@ -44,7 +45,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run Visual Transformer experiments.')
     ### Experiment parameters ###
-    parser.add_argument('mode', type=str, nargs='+', choices=['cka-similarity', 'jacobian-similarity'])
+    parser.add_argument('mode', type=str, nargs='+', choices=['cosine-similarity', 'cka-similarity', 'jacobian-similarity'])
     parser.add_argument('--within-block', action='store_true')
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
@@ -58,7 +59,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=128)
     ### Model parameters ###
     parser.add_argument('--model-name', type=str)
-    parser.add_argument('--model-folder', type=str)
+    parser.add_argument('--model-folder', type=str, default=None)
     parser.add_argument('--pruned', action='store_true')
     parser.add_argument('--distilled', action='store_true')
     parser.add_argument('--device', type=str, choices=['cpu', 'cuda'])
@@ -84,6 +85,7 @@ if __name__ == '__main__':
 
     # Setup storage system
     results = {
+        'all-cosine-similarities': [],
         'all-cka-similarities': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
@@ -102,19 +104,28 @@ if __name__ == '__main__':
             # elif args.dataset_name == 'coco':
             #     inputs = batch[0].to(args.device)
 
-            if 'cka-similarity' in args.mode:
-                pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing CKA similarities...") # set pbar description
+            if 'cosine-similarity' in args.mode or 'cka-similarity' in args.mode:
+                pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing feature similarities...") # set pbar description
 
                 # Extract intermediate features (within and between transformer encoder blocks)
                 features, n_feature_layers = extract_features(inputs, analyzer)
 
                 # Compute similarities between intermediate features and input
-                similarities = torch.zeros((n_feature_layers, n_feature_layers))
+                cos_similarities = torch.zeros((n_feature_layers, n_feature_layers))
+                cka_similarities = torch.zeros((n_feature_layers, n_feature_layers))
                 for layer_i in range(n_feature_layers):
                     for layer_j in range(layer_i+1, n_feature_layers):
-                        similarities[layer_i, layer_j] = compute_cka_from_tensors(features[f'layer{layer_i}'], features[f'layer{layer_j}'], kernel_func='linear')
-                similarities += similarities.T + torch.eye(n_feature_layers) # Symmetrize
-                results['all-cka-similarities'].append(similarities)
+                        if 'cosine-similarity' in args.mode:
+                            cos_similarities[layer_i, layer_j] = torch.nn.functional.cosine_similarity(features[f'layer{layer_i}'].flatten(1), features[f'layer{layer_j}'].flatten(1)).mean()
+                        if 'cka-similarity' in args.mode:
+                            cka_similarities[layer_i, layer_j] = compute_cka_from_tensors(features[f'layer{layer_i}'], features[f'layer{layer_j}'], kernel_func='linear')
+                
+                if 'cosine-similarity' in args.mode:
+                    cos_similarities += cos_similarities.T + torch.eye(n_feature_layers) # Symmetrize
+                    results['all-cosine-similarities'].append(cos_similarities)
+                if 'cka-similarity' in args.mode:
+                    cka_similarities += cka_similarities.T + torch.eye(n_feature_layers) # Symmetrize
+                    results['all-cka-similarities'].append(cka_similarities)
 
             if 'jacobian-similarity' in args.mode:
                 jacobians, jacobian_similarities_batch = {}, {}

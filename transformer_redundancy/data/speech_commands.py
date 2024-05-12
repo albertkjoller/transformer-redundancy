@@ -7,6 +7,11 @@ def load_processor(name):
         return Wav2Vec2FeatureExtractor.from_pretrained("facebook/wav2vec2-large")
     elif "wav2vec2" in name:
         return Wav2Vec2FeatureExtractor.from_pretrained("facebook/wav2vec2-base")
+    elif 'wavlm' in name.lower() and 'large' in name:
+        return AutoFeatureExtractor.from_pretrained("microsoft/wavlm-large")
+    elif 'wavlm' in name.lower():
+        return AutoFeatureExtractor.from_pretrained("microsoft/wavlm-base")
+    
     else:
         raise NotImplementedError(f"Processor for {name} not implemented...")
 
@@ -29,7 +34,7 @@ def get_speech_commands_loaders(model_name: str, batch_size: int, num_proc: int 
         # Shuffle the dataset split
         _dset = dataset[split].shuffle(seed=seed)
 
-        if 'words' in model_name:
+        if 'speaker' not in model_name:
             # Process dataset
             _dset = _dset.map(lambda x: process_dataset(x, processor), remove_columns=['file', 'audio', 'is_unknown', 'speaker_id', 'utterance_id'], num_proc=num_proc)
             _dset.set_format(type="torch", columns=["input_values", "label"])
