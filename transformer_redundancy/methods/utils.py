@@ -51,6 +51,7 @@ def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwar
 
             # Get attention outputs if available (within_block mode only)
             attention_output = None if kwargs['info'].get('attention_outputs') in [None, []] else kwargs['info'].get('attention_outputs')[_idx] 
+            position_bias = None if kwargs['info'].get('position_bias') in [None, []] else kwargs['info'].get('position_bias')[_idx] 
 
             if kwargs['dataset_name'] == 'go_emotions':
                 # Define function (batched on classes due to memory constraints)
@@ -60,7 +61,7 @@ def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwar
 
             elif kwargs['dataset_name'] == 'speech_commands':
                 # Define function (batched on classes due to memory constraints)
-                _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations, attention_outputs=attention_output)
+                _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations, attention_outputs=attention_output, **{'position_bias': position_bias})
                 # Compute Jacobian per input for selected classes
                 J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z.unsqueeze(0)).cpu().squeeze([0,1])
             
@@ -70,3 +71,13 @@ def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwar
             torch.cuda.empty_cache()
     
     return Js
+
+def prune_model_by_heuristic(model, layers_to_prune: list):
+    # Get the list of encoder layers
+    encoder_layers = model.base_model.encoder.layers
+    # Prune layers
+    for layer_idx in layers_to_prune:
+        del encoder_layers[layer_idx]
+    # Update the model's encoder layers
+    model.base_model.encoder.layers = encoder_layers
+    return model

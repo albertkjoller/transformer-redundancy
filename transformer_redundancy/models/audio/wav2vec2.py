@@ -15,29 +15,27 @@ def prune_model(model, layer):
 
 class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
       
-    def __init__(self, model_name: str, model_folder: Optional[str] = None, pruned: bool = False, device='cuda'):
+    def __init__(self, model_name: str, model_folder: Optional[str] = None, device='cuda'):
         super().__init__()
 
         self.model_name = model_name
         self.model_folder = model_folder
-        self.pruned = pruned
         self.device = device
         self.model, self.num_layers = self.load_model()
         self.model.eval()
         self._hooks_registed = False
 
-    def load_model(self):
+    def load_model(self, prune_amount: int = None):
         if self.model_folder is not None:
             # Load finetuned Wav2Vec model
             model_path = f"{self.model_folder}/{self.model_name}-finetuned" 
-            model_path += '-pruned/' if self.pruned else '/'
         else: # load pre-trained
             model_path = self.model_name # 'facebook/wav2vec2-base'
         
         # Load model
         model = AutoModelForAudioClassification.from_pretrained(model_path).to(self.device)
-        if self.pruned:
-            model = prune_model(model, 8)
+        if prune_amount is not None:
+            model = prune_model(model, self.num_layers - prune_amount)
         
         num_layers = model.wav2vec2.encoder.layers.__len__()
         return model, num_layers

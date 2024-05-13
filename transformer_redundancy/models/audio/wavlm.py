@@ -8,37 +8,34 @@ def prune_model(model, layer):
     # Get the list of encoder layers
     encoder_layers = model.base_model.encoder.layers
     # Remove layers between the given layer number and the classification head
-    del encoder_layers[layer+1:]
+    del encoder_layers[layer:]
     # Update the model's encoder layers
     model.base_model.encoder.layers = encoder_layers
     return model
 
 class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
       
-    def __init__(self, model_name: str, model_folder: Optional[str] = None, pruned: bool = False, device='cuda'):
+    def __init__(self, model_name: str, model_folder: Optional[str] = None, device='cuda'):
         super().__init__()
 
         self.model_name = model_name
         self.model_folder = model_folder
-        self.pruned = pruned
         self.device = device
         self.model, self.num_layers = self.load_model()
         self.model.eval()
         self._hooks_registed = False
 
-    def load_model(self):
+    def load_model(self, prune_amount: int = None):
         if self.model_folder is not None:
             # Load finetuned wavLM model
             model_path = f"{self.model_folder}/{self.model_name}-finetuned" 
-            model_path += '-pruned/' if self.pruned else '/'
         else: # load pre-trained
             model_path = self.model_name
-        
 
         # Load model
         model = AutoModelForAudioClassification.from_pretrained(model_path).to(self.device)
-        if self.pruned:
-            model = prune_model(model, 8)
+        if prune_amount is not None:
+            model = prune_model(model, self.num_layers - prune_amount)
         
         # Check if model uses stable layers
         self.stable_layers = 'stable' in model.wavlm.encoder.layers[0].__class__.__name__.lower()
@@ -82,7 +79,7 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
             z = self.model.wavlm.encoder.layer_norm(z)
         z = self.model.wavlm.encoder.dropout(z)
 
-        position_bias = None
+        _pos_bias = None
         # Pass embeddings through encoder network
         for layer_idx, _layer in enumerate(self.model.wavlm.encoder.layers):
             if layer_idx == from_layer and within_block:
@@ -94,7 +91,10 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
                 if layer_idx == from_layer:
                     intermediates = z
 
-                z, position_bias = _layer(z,  position_bias=position_bias)[:2]
+                z, _pos_bias = _layer(z,  position_bias=_pos_bias)[:2]
+                if layer_idx == from_layer:
+                    position_bias = _pos_bias
+
                 if layer_idx >= from_layer:
                     # Add operation to operations
                     operations[i] = _layer
@@ -113,7 +113,7 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
         operations[i+1] = lambda x: self.model.classifier(x.mean(dim=1))
 
         _orig_outputs = self.model(inputs).logits
-        assert torch.allclose(_orig_outputs, self.__get_output_from__(intermediates, operations), atol=1e-3, rtol=1e-5), "Encoder block decomposition is incorrect..."
+        assert torch.allclose(_orig_outputs, self.__get_output_from__(intermediates, operations, position_bias=_pos_bias), atol=1e-3, rtol=1e-5), "Encoder block decomposition is incorrect..."
         assert torch.allclose(_orig_outputs, z, atol=1e-3, rtol=1e-5), "Full model decomposition is incorrect..."
 
         if self._hooks_registed:
@@ -121,11 +121,11 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
             for i, (k, v) in enumerate(self.features.items()):
                 self.features[k] = v[0].to('cpu') if not self._register_intermediate or int(k[5:]) % 2 == 1 else v.detach().to('cpu')
 
-        return operations, intermediates, {}
+        return operations, intermediates, {'position_bias': position_bias}
     
     def __get_output_from__(self, intermediates: torch.Tensor, operations: dict, **kwargs):
         __z = intermediates
-        _pos_bias = None
+        _pos_bias = kwargs['position_bias']
 
         # iterate through operations of the last part of the network 
         for i, _op in operations.items():
