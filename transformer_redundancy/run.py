@@ -46,11 +46,11 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run Visual Transformer experiments.')
     ### Experiment parameters ###
-    parser.add_argument('mode', type=str, nargs='+', choices=['pruning-performance', 'cosine-similarity', 'cka-similarity', 'jacobian-similarity', 'block-inference'])
+    parser.add_argument('mode', type=str, nargs='+', choices=['pruning-performance', 'cosine-similarity', 'cka-similarity', 'jacobian-similarity'])
     parser.add_argument('--within-block', action='store_true')
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
-    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'block-inference', 'jacobian-rank'], default=[])
+    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'block-influence', 'jacobian-rank'], default=[])
     parser.add_argument('--prune-amount-range', nargs='+', type=int, help='Number of layers to prune.', default=[])
     parser.add_argument('--c-per-iter', type=int, default=20)
     parser.add_argument('--max-iter', type=int, default=100)
@@ -91,7 +91,7 @@ if __name__ == '__main__':
         'accuracy': {k: defaultdict(list) for k in args.prune_by},
         'all-cosine-similarities': [],
         'all-cka-similarities': [],
-        'all-block-inferences': [],
+        'all-block-influences': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
     }
@@ -109,14 +109,14 @@ if __name__ == '__main__':
             # elif args.dataset_name == 'coco':
             #     inputs = batch[0].to(args.device)
 
-            if any([_m in ['cosine-similarity', 'cka-similarity'] for _m in args.mode]) or 'block-inference' in args.prune_by:
+            if any([_m in ['cosine-similarity', 'cka-similarity'] for _m in args.mode]) or 'block-influence' in args.prune_by:
                 pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing feature similarities...") # set pbar description
 
                 # Extract intermediate features (within and between transformer encoder blocks)
                 features, n_feature_layers = extract_features(inputs, analyzer, register_intermediate=args.within_block)
 
                 # Compute block inference scores
-                if 'block-inference' in args.prune_by:
+                if 'block-influence' in args.prune_by:
                     assert not args.within_block, "Block inference scores can only be computed between blocks."
                     # features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers)[1::2])}
                     features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
@@ -132,7 +132,7 @@ if __name__ == '__main__':
                         bi_scores[:, layer_i] = 1 - dot_prod / (norm_before * norm_after)
                     
                     # Store block inference scores
-                    results['all-block-inferences'].append(bi_scores)
+                    results['all-block-influences'].append(bi_scores)
 
                 if any([_m in ['cosine-similarity', 'cka-similarity'] for _m in args.mode]):
 
@@ -244,11 +244,11 @@ if __name__ == '__main__':
                         preds = torch.argmax(logits, dim=1).cpu()
                         results['accuracy']['forward'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
 
-                if 'block-inference' in args.prune_by:
+                if 'block-influence' in args.prune_by:
                     pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing BI-pruned accuracies...") # set pbar description
 
                     # Compute prune order
-                    _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-block-inferences']), dim=0), descending=False) + 1 # Skip first layer
+                    _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-block-influences']), dim=0), descending=False) + 1 # Skip first layer
                     for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
                         # Prune model by block inference scores
                         _model, _ = analyzer.load_model()
@@ -257,7 +257,7 @@ if __name__ == '__main__':
                         # Compute accuracy
                         logits = _model(inputs).logits
                         preds = torch.argmax(logits, dim=1).cpu()
-                        results['accuracy']['block-inference'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
+                        results['accuracy']['block-influence'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
 
                 if 'jacobian-rank' in args.prune_by:
                     assert 'jacobian-similarity' in args.mode, "Jacobian similarity scores can only be computed with Jacobian similarities."
