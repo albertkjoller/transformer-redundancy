@@ -34,14 +34,16 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
 
         # Register forward hooks
         layer_name = 0
+        handles = []
         self._register_intermediate = register_intermediate
         for layer_idx in range(self.num_layers):
             if register_intermediate:
-                self.model.beit.encoder.layer[layer_idx].intermediate.register_forward_hook(self.get_features(f"layer{layer_name}"))
-                self.model.beit.encoder.layer[layer_idx].register_forward_hook(self.get_features(f"layer{layer_name + 1}"))
+                handles.append(self.model.beit.encoder.layer[layer_idx].intermediate.register_forward_hook(self.get_features(f"layer{layer_name}")))
+                handles.append(self.model.beit.encoder.layer[layer_idx].register_forward_hook(self.get_features(f"layer{layer_name + 1}")))
                 layer_name += 2
             else:
-                self.model.beit.encoder.layer[layer_idx].register_forward_hook(self.get_features(f"layer{layer_idx}"))
+                handles.append(self.model.beit.encoder.layer[layer_idx].register_forward_hook(self.get_features(f"layer{layer_idx}")))
+        return handles
     
     def __element_wise_breakdown__(self, inputs, from_layer: int, within_block: bool = False):
         # Setup for storing operations from layer

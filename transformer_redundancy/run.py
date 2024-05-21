@@ -84,7 +84,8 @@ if __name__ == '__main__':
     domain = get_domain(args)
     loaders, label2cat = get_loaders(**args.__dict__)
     analyzer = get_analyzer(args)
-    save_filename = f'{args.save_path}/{domain}/{args.model_name.split("/")[-1]}_within={args.within_block}_{args.mode}'
+    save_filename = f'{args.save_path}/{domain}/{args.model_name.split("/")[-1]}/within={args.within_block}_{args.mode}'
+    print(save_filename)
 
     # Setup storage system
     results = {
@@ -218,7 +219,7 @@ if __name__ == '__main__':
             for batch in loaders["validation"]:
                 if args.dataset_name == 'imagenet-1k':
                     inputs = batch[0].to(args.device)
-                    labels = batch[1].to(args.device)
+                    labels = batch[1].to('cpu')
                 elif args.dataset_name == 'go_emotions':
                     inputs = batch["text"]
                     labels = torch.tensor(batch["labels"]).flatten()
@@ -241,7 +242,7 @@ if __name__ == '__main__':
                             _model = prune_model_backward(_model, analyzer.num_layers - _prune_amount) # remove last layers first
 
                         # Compute accuracy
-                        preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                        preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]).cpu() if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
                         results['accuracy']['backward'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                 if 'forward' in args.prune_by:
@@ -314,5 +315,5 @@ if __name__ == '__main__':
                 pbar.update(1)
 
 
-    os.makedirs(f"{args.save_path}/{domain}", exist_ok=True)
+    os.makedirs(f"{args.save_path}/{domain}/{args.model_name.split('/')[-1]}", exist_ok=True)
     torch.save(results, save_filename + f'_results.pth')
