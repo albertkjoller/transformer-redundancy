@@ -17,7 +17,7 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
         self._hooks_registed = False
 
     def load_model(self):
-        if self.model_folder is not None:
+        if self.model_folder not in [None, "None"]:
             # Load finetuned Wav2Vec model
             model_path = f"{self.model_folder}/{self.model_name}-finetuned" 
         else: # load pre-trained

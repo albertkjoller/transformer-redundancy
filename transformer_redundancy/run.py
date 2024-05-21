@@ -133,24 +133,37 @@ if __name__ == '__main__':
                     # Store block inference scores
                     results['all-block-influences'].append(bi_scores)
 
-                if any([_m in ['cosine-similarity', 'cka-similarity'] for _m in args.mode]):
+                if 'cosine-similarity' in args.mode:
+                    # Extract features for withing and between encoder blocks
+                    within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
+                    between_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[1::2]]).permute(1,0,2)
 
-                    # Compute similarities between intermediate features and input
-                    cos_similarities = torch.zeros((n_feature_layers, n_feature_layers))
+                    # Compute cosine similarities between intermediate features and input
+                    cos_similarities_within = torch.zeros((n_feature_layers // 2, n_feature_layers // 2))
+                    cos_similarities_between = torch.zeros((n_feature_layers // 2, n_feature_layers // 2))
+                    # Iterate through batch members
+                    for _idx in range(args.batch_size):
+                        # Even features
+                        normalized_within_features = torch.nn.functional.normalize(within_features[_idx], p=2, dim=1)
+                        cos_similarities_within += torch.mm(normalized_within_features, normalized_within_features.T)
+                        # Odd features                    
+                        normalized_odd_features = torch.nn.functional.normalize(between_features[_idx], p=2, dim=1)
+                        cos_similarities_between += torch.mm(normalized_odd_features, normalized_odd_features.T)
+                    
+                    # Take average of batch and store results
+                    cos_similarities_within /= args.batch_size
+                    cos_similarities_between /= args.batch_size
+                    results['all-cosine-similarities'].append({'within': cos_similarities_within, 'between': cos_similarities_between})
+
+                if 'cka-similarity' in args.mode:
+                    # Compute CKA similarities between intermediate features and input
                     cka_similarities = torch.zeros((n_feature_layers, n_feature_layers))
                     for layer_i in range(n_feature_layers):
                         for layer_j in range(layer_i+1, n_feature_layers):
-                            if 'cosine-similarity' in args.mode:
-                                cos_similarities[layer_i, layer_j] = torch.nn.functional.cosine_similarity(features[f'layer{layer_i}'].flatten(1), features[f'layer{layer_j}'].flatten(1)).mean()
-                            if 'cka-similarity' in args.mode:
-                                cka_similarities[layer_i, layer_j] = compute_cka_from_tensors(features[f'layer{layer_i}'], features[f'layer{layer_j}'], kernel_func='linear')
+                            cka_similarities[layer_i, layer_j] = compute_cka_from_tensors(features[f'layer{layer_i}'], features[f'layer{layer_j}'], kernel_func='linear')
                     
-                    if 'cosine-similarity' in args.mode:
-                        cos_similarities += cos_similarities.T + torch.eye(n_feature_layers) # Symmetrize
-                        results['all-cosine-similarities'].append(cos_similarities)
-                    if 'cka-similarity' in args.mode:
-                        cka_similarities += cka_similarities.T + torch.eye(n_feature_layers) # Symmetrize
-                        results['all-cka-similarities'].append(cka_similarities)
+                    cka_similarities += cka_similarities.T + torch.eye(n_feature_layers) # Symmetrize
+                    results['all-cka-similarities'].append(cka_similarities)
 
             if 'jacobian-similarity' in args.mode:
                 jacobians, jacobian_similarities_batch = {}, {}
@@ -204,7 +217,7 @@ if __name__ == '__main__':
         with torch.no_grad():
             for batch in loaders["test"]:
                 if args.dataset_name == 'imagenet-1k':
-                    inputs = {'pixel_values': batch[0].to(args.device)}
+                    inputs = batch[0].to(args.device)
                 elif args.dataset_name == 'go_emotions':
                     inputs = batch["text"]
                 elif args.dataset_name == 'speech_commands':
