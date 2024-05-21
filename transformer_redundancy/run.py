@@ -3,7 +3,7 @@ from transformer_redundancy.data import *
 from transformer_redundancy.models.vision import *
 from transformer_redundancy.models.text import *
 from transformer_redundancy.models.audio import *
-from transformer_redundancy.methods.utils import extract_features, __compute_jacobian__, prune_model_by_heuristic
+from transformer_redundancy.methods.utils import extract_features, __compute_jacobian__, prune_model_by_heuristic, prune_model_backward
 from transformer_redundancy.methods.cka import compute_cka_from_tensors
 
 def get_domain(args):
@@ -217,7 +217,8 @@ if __name__ == '__main__':
 
                     for _prune_amount in range(args.prune_amount_range[0], args.prune_amount_range[1]):
                         # Currently only works for audio-models
-                        _model, _ = analyzer.load_model(prune_amount=_prune_amount)
+                        _model, _ = analyzer.load_model()
+                        _model = prune_model_backward(_model, analyzer.num_layers - _prune_amount) # remove last layers first
 
                         # Compute accuracy
                         logits = _model(inputs).logits

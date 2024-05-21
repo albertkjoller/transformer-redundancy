@@ -4,15 +4,6 @@ import torch
 from ..layerwise import LayerWiseAnalysis
 from transformers import AutoModelForAudioClassification
 
-def prune_model(model, layer):
-    # Get the list of encoder layers
-    encoder_layers = model.base_model.encoder.layers
-    # Remove layers between the given layer number and the classification head
-    del encoder_layers[layer+1:]
-    # Update the model's encoder layers
-    model.base_model.encoder.layers = encoder_layers
-    return model
-
 class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
       
     def __init__(self, model_name: str, model_folder: Optional[str] = None, device='cuda'):
@@ -25,7 +16,7 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
         self.model.eval()
         self._hooks_registed = False
 
-    def load_model(self, prune_amount: int = None):
+    def load_model(self):
         if self.model_folder is not None:
             # Load finetuned Wav2Vec model
             model_path = f"{self.model_folder}/{self.model_name}-finetuned" 
@@ -33,10 +24,7 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
             model_path = self.model_name # 'facebook/wav2vec2-base'
         
         # Load model
-        model = AutoModelForAudioClassification.from_pretrained(model_path).to(self.device)
-        if prune_amount is not None:
-            model = prune_model(model, self.num_layers - prune_amount)
-        
+        model = AutoModelForAudioClassification.from_pretrained(model_path).to(self.device)        
         num_layers = model.wav2vec2.encoder.layers.__len__()
         return model, num_layers
             

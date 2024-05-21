@@ -4,15 +4,6 @@ import torch
 from ..layerwise import LayerWiseAnalysis
 from transformers import AutoModelForAudioClassification
 
-def prune_model(model, layer):
-    # Get the list of encoder layers
-    encoder_layers = model.base_model.encoder.layers
-    # Remove layers between the given layer number and the classification head
-    del encoder_layers[layer:]
-    # Update the model's encoder layers
-    model.base_model.encoder.layers = encoder_layers
-    return model
-
 class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
       
     def __init__(self, model_name: str, model_folder: Optional[str] = None, device='cuda'):
@@ -25,7 +16,7 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
         self.model.eval()
         self._hooks_registed = False
 
-    def load_model(self, prune_amount: int = None):
+    def load_model(self):
         if self.model_folder is not None:
             # Load finetuned wavLM model
             model_path = f"{self.model_folder}/{self.model_name}-finetuned" 
@@ -34,8 +25,6 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
 
         # Load model
         model = AutoModelForAudioClassification.from_pretrained(model_path).to(self.device)
-        if prune_amount is not None:
-            model = prune_model(model, self.num_layers - prune_amount)
         
         # Check if model uses stable layers
         self.stable_layers = 'stable' in model.wavlm.encoder.layers[0].__class__.__name__.lower()

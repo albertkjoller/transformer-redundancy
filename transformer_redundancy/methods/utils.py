@@ -74,10 +74,26 @@ def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwar
 
 def prune_model_by_heuristic(model, layers_to_prune: list):
     # Get the list of encoder layers
-    encoder_layers = model.base_model.encoder.layers
+    try:
+        encoder_layers = model.base_model.encoder.layers
+    except AttributeError:
+        encoder_layers = model.base_model.encoder.layer
+    
     # Prune layers
     for layer_idx in layers_to_prune:
         del encoder_layers[layer_idx]
+    # Update the model's encoder layers
+    model.base_model.encoder.layers = encoder_layers
+    return model
+
+def prune_model_backward(model, layer):
+    # Get the list of encoder layers
+    try:
+        encoder_layers = model.base_model.encoder.layers
+    except AttributeError:
+        encoder_layers = model.base_model.encoder.layer
+    # Remove layers between the given layer number and the classification head
+    del encoder_layers[layer:]
     # Update the model's encoder layers
     model.base_model.encoder.layers = encoder_layers
     return model
