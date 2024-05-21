@@ -118,7 +118,6 @@ if __name__ == '__main__':
                 # Compute block inference scores
                 if 'block-influence' in args.prune_by:
                     assert not args.within_block, "Block inference scores can only be computed between blocks."
-                    # features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers)[1::2])}
                     features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
 
                     bi_scores = torch.zeros((args.batch_size, analyzer.num_layers - 1))
@@ -167,17 +166,10 @@ if __name__ == '__main__':
                     if args.jacobian_between_layers:
                         jacobians[k] = J
 
-                    # Compute similarities between Jacobians across the batch
-                    _batch_sim_output = torch.ones((args.batch_size, args.batch_size))
-                    for i in range(args.batch_size):
-                        pbar.set_description(base_desc + f"Similarity of {i+1}/{args.batch_size}") # update pbar info
+                    # Compute and store similarities between Jacobians across the batch
+                    J_norm = torch.nn.functional.normalize(J, p=2, dim=1)
+                    jacobian_similarities_batch[f'layer{k}'] = torch.mm(J_norm, J_norm.T)
 
-                        # Compute pairwise cosine similarity between Jacobians of different data points
-                        for j in range(i+1, args.batch_size):
-                            _batch_sim_output[i,j] = _batch_sim_output[j,i] = torch.nn.functional.cosine_similarity(J[i].to(args.device).flatten(), J[j].to(args.device).flatten(), dim=0).item()
-                    
-                    # Store batch similarities 
-                    jacobian_similarities_batch[f'layer{k}'] = _batch_sim_output
                 results['all-jacobian-batch-similarities'].append(jacobian_similarities_batch)
 
                 if args.jacobian_between_layers:
