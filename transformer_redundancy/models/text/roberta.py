@@ -59,6 +59,8 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
             # Pass embeddings through encoder network
             for layer_idx, _layer in enumerate(self.pipeline.model.roberta.encoder.layer):
                 if layer_idx == from_layer and within_block:
+                    raise NotImplementedError("Within block mode is currently not implemented for RoBERTa...")
+
                     # Modified from: https://github.com/huggingface/transformers/blob/main/src/transformers/models/roberta/modeling_roberta.py (line 389-469)                
 
                     self_attention_outputs = _layer.attention(z)
@@ -110,12 +112,7 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
         # Verify decomposition against most likely label
         _orig_outputs = [self.pipeline.model(self.pipeline.preprocess({'text': _input})['input_ids'].to(self.device)).logits for _input in inputs]
         _orig_outputs = torch.stack(_orig_outputs).squeeze(1).sigmoid().max(dim=1)[0]
-        if not within_block:
-            assert torch.allclose(_orig_outputs, self.__get_output_from__(_zs, operations).max(dim=1)[0]), "Encoder block decomposition is incorrect..." 
-        else:
-            pass
-            # TODO: fix __get_output_from__ - first operation does not give the exact output wanted due to something with dropout?
-            # assert torch.allclose(_orig_outputs, self.__get_output_from__(_zs, operations, attention_outputs=_as, within_block=within_block).max(dim=1)[0]), "Encoder block decomposition is incorrect..." 
+        assert torch.allclose(_orig_outputs, self.__get_output_from__(_zs, operations).max(dim=1)[0]), "Encoder block decomposition is incorrect..." 
         assert torch.allclose(_orig_outputs, zs.max(dim=1)[0]), "Full model decomposition is incorrect..."
         
         if self._hooks_registed:
