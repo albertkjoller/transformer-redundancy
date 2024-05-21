@@ -82,7 +82,7 @@ if __name__ == '__main__':
 
     # Get data domain and loaders
     domain = get_domain(args)
-    loaders = get_loaders(**args.__dict__)
+    loaders, label2cat = get_loaders(**args.__dict__)
     analyzer = get_analyzer(args)
     save_filename = f'{args.save_path}/{domain}/{args.model_name.split("/")[-1]}_within={args.within_block}_{args.mode}'
 
@@ -215,13 +215,16 @@ if __name__ == '__main__':
         save_filename += f'_pruned-by={args.prune_by}'
 
         with torch.no_grad():
-            for batch in loaders["test"]:
+            for batch in loaders["validation"]:
                 if args.dataset_name == 'imagenet-1k':
                     inputs = batch[0].to(args.device)
+                    labels = batch[1].to(args.device)
                 elif args.dataset_name == 'go_emotions':
                     inputs = batch["text"]
+                    labels = torch.tensor(batch["labels"]).flatten()
                 elif args.dataset_name == 'speech_commands':
                     inputs = batch["input_values"].to(args.device)
+                    labels = batch["label"]
                 # elif args.dataset_name == 'coco':
 
                 if 'backward' in args.prune_by:
@@ -230,13 +233,16 @@ if __name__ == '__main__':
 
                     for _prune_amount in range(args.prune_amount_range[0], args.prune_amount_range[1]):
                         # Currently only works for audio-models
-                        _model, _ = analyzer.load_model()
-                        _model = prune_model_backward(_model, analyzer.num_layers - _prune_amount) # remove last layers first
+                        if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                            _model, _ = analyzer.load_model()
+                            _model.model = prune_model_backward(_model.model, analyzer.num_layers - _prune_amount) # remove last layers first
+                        else:
+                            _model, _ = analyzer.load_model()
+                            _model = prune_model_backward(_model, analyzer.num_layers - _prune_amount) # remove last layers first
 
                         # Compute accuracy
-                        logits = _model(inputs).logits
-                        preds = torch.argmax(logits, dim=1).cpu()
-                        results['accuracy']['backward'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
+                        preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                        results['accuracy']['backward'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                 if 'forward' in args.prune_by:
                     pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing forward-pruned accuracies...") # set pbar description
@@ -244,14 +250,17 @@ if __name__ == '__main__':
                     # Compute prune order
                     _prune_order = torch.arange(1, analyzer.num_layers)
                     for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
-                        # Prune model by block inference scores
-                        _model, _ = analyzer.load_model()
-                        _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
+                        # Prune model by forward
+                        if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                            _model, _ = analyzer.load_model()
+                            _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
+                        else:
+                            _model, _ = analyzer.load_model()
+                            _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
 
                         # Compute accuracy
-                        logits = _model(inputs).logits
-                        preds = torch.argmax(logits, dim=1).cpu()
-                        results['accuracy']['forward'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
+                        preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                        results['accuracy']['forward'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                 if 'block-influence' in args.prune_by:
                     pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing BI-pruned accuracies...") # set pbar description
@@ -260,13 +269,16 @@ if __name__ == '__main__':
                     _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-block-influences']), dim=0), descending=False) + 1 # Skip first layer
                     for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
                         # Prune model by block inference scores
-                        _model, _ = analyzer.load_model()
-                        _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                        if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                            _model, _ = analyzer.load_model()
+                            _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                        else:
+                            _model, _ = analyzer.load_model()
+                            _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
 
                         # Compute accuracy
-                        logits = _model(inputs).logits
-                        preds = torch.argmax(logits, dim=1).cpu()
-                        results['accuracy']['block-influence'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
+                        preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                        results['accuracy']['block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                 if 'jacobian-rank' in args.prune_by:
                     assert 'jacobian-similarity' in args.mode, "Jacobian similarity scores can only be computed with Jacobian similarities."
@@ -284,13 +296,16 @@ if __name__ == '__main__':
                     _prune_order = _prune_order[_prune_order != 0]
                     for _prune_amount in range(args.prune_amount_range[0], args.prune_amount_range[1]):
                         # Prune model by Jacobian rank
-                        _model, _ = analyzer.load_model()
-                        _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                        if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                            _model, _ = analyzer.load_model()
+                            _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                        else:
+                            _model, _ = analyzer.load_model()
+                            _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
 
                         # Compute accuracy
-                        logits = _model(inputs).logits
-                        preds = torch.argmax(logits, dim=1).cpu()
-                        results['accuracy']['jacobian-rank'][_prune_amount].append((preds == batch["label"]).sum().item() / args.batch_size)
+                        preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                        results['accuracy']['jacobian-rank'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                 # Check if maximum iterations are reached
                 if current_iteration >= args.max_iter - 1:

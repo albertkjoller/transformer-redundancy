@@ -21,4 +21,4 @@ def get_go_emotions_loaders(batch_size: int=32, seed: int=0):
             elements = _order[batch_size*batch_idx:batch_size*(1+batch_idx)]
             loaders[split].append(dataset_dict[split][elements])
     
-    return loaders
+    return loaders, {n: i for i, n in enumerate(dataset_dict["validation"].features["labels"].feature.names)}
