@@ -203,6 +203,9 @@ if __name__ == '__main__':
     current_iteration = 0
     pbar = tqdm(total=args.max_iter)
     if 'pruning-performance' in args.mode:
+        if args.prune_amount_range == []:
+            args.prune_amount_range = [0, analyzer.num_layers]
+
         assert args.prune_by != [], "Prune by must be specified to compute performance."
         save_filename += f'_pruned-by={args.prune_by}'
 
