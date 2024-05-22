@@ -72,7 +72,7 @@ if __name__ == '__main__':
     # Load environment variables
     load_dotenv()
     login(os.getenv('HF_TOKEN'))
-    os.environ["HF_HOME"] = os.getenv('HF_HOME')
+    # os.environ["HF_HOME"] = os.getenv('HF_HOME')
 
     # Clear pytorch cache
     torch.cuda.empty_cache()
@@ -100,11 +100,13 @@ if __name__ == '__main__':
     }
 
     current_iteration = 0
+    args.max_iter = args.max_iter + args.start_iter
     pbar = tqdm(total=args.max_iter)
     with torch.no_grad():
         for batch in loaders["test"]:
             if current_iteration < args.start_iter:
                 current_iteration += 1
+                pbar.update(1)
             
             else:
                 if args.dataset_name == 'imagenet-1k':
