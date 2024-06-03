@@ -5,14 +5,13 @@ from transformer_redundancy.models.text import *
 from transformer_redundancy.models.audio import *
 from transformer_redundancy.methods.utils import extract_features, __compute_jacobian__, prune_model_by_heuristic, prune_model_backward
 from transformer_redundancy.methods.cka import compute_cka_from_tensors
+from transformer_redundancy.methods.procrustes import procrustes_similarity
 
 def get_domain(args):
     if args.dataset_name in ['imagenet-1k']:
         return 'vision'
     elif args.dataset_name in ['go_emotions']:
         return 'text'
-    elif args.dataset_name in ['coco']:
-        return 'multimodal'
     elif args.dataset_name in ['speech_commands']:
         return 'audio'
     else:
@@ -27,9 +26,6 @@ def get_analyzer(args):
         return DinoV2ForLayerwiseAnalysis(args.model_name, device=args.device)
     elif 'roberta' in args.model_name:
         return RoBERTaForLayerwiseAnalysis(args.model_name, device=args.device)
-    elif 'clip' in args.model_name:
-        raise NotImplementedError("CLIP models not supported.")
-        # return CLIPForLayerwiseAnalysis(args.model_name, device=args.device)
     elif 'wav2vec2' in args.model_name:
         return Wav2VecForLayerwiseAnalysis(args.model_name, model_folder=args.model_folder, device=args.device)
     elif 'wavlm' in args.model_name.lower():
@@ -46,12 +42,14 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run Visual Transformer experiments.')
     ### Experiment parameters ###
-    parser.add_argument('mode', type=str, nargs='+', choices=['pruning-performance', 'cosine-similarity', 'cka-similarity', 'jacobian-similarity'])
+    parser.add_argument('mode', type=str, nargs='+', choices=['pruning-performance', 'cosine-similarity', 'cka-similarity', 'jacobian-similarity', 'procrustes-similarity'])
     parser.add_argument('--within-block', action='store_true')
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
-    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'block-influence', 'jacobian-rank'], default=[])
+    parser.add_argument('--jacobian-single-target', action='store_true')
+    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'forward-backward', 'block-influence', 'jacobian-rank'], default=[])
     parser.add_argument('--prune-amount-range', nargs='+', type=int, help='Number of layers to prune.', default=[])
+    parser.add_argument('--custom-pruning', nargs='+', type=int, help='Order.', default=[])
     parser.add_argument('--c-per-iter', type=int, default=20)
     parser.add_argument('--max-iter', type=int, default=50)
     parser.add_argument('--start-iter', type=int, default=0)
@@ -59,6 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-path', type=str, default='../experiments', help='Directory to save the bsub files.')
     ### Data parameters ###
     parser.add_argument('--dataset-name', type=str, choices=['coco', 'imagenet-1k', 'go_emotions', 'speech_commands'])
+    parser.add_argument('--coco-path', type=str, default=None)
     parser.add_argument('--processor-name', type=str)
     parser.add_argument('--batch-size', type=int, default=128)
     ### Model parameters ###
@@ -72,7 +71,7 @@ if __name__ == '__main__':
     # Load environment variables
     load_dotenv()
     login(os.getenv('HF_TOKEN'))
-    # os.environ["HF_HOME"] = os.getenv('HF_HOME')
+    os.environ["HF_HOME"] = os.getenv('HF_HOME')
 
     # Clear pytorch cache
     torch.cuda.empty_cache()
@@ -91,9 +90,10 @@ if __name__ == '__main__':
 
     # Setup storage system
     results = {
-        'accuracy': {k: defaultdict(list) for k in args.prune_by},
+        'accuracy': {k: defaultdict(list) for k in args.prune_by + ['custom']},
         'all-cosine-similarities': [],
         'all-cka-similarities': [],
+        'all-procrustes-similarities': [],
         'all-block-influences': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     args.max_iter = args.max_iter + args.start_iter
     pbar = tqdm(total=args.max_iter)
     with torch.no_grad():
-        for batch in loaders["test"]:
+        for batch in loaders["validation"]:
             if current_iteration < args.start_iter:
                 current_iteration += 1
                 pbar.update(1)
@@ -111,14 +111,18 @@ if __name__ == '__main__':
             else:
                 if args.dataset_name == 'imagenet-1k':
                     inputs = {'pixel_values': batch[0].to(args.device)}
+                    labels = batch[1].to('cpu') if args.jacobian_single_target else None
                 elif args.dataset_name == 'go_emotions':
                     inputs = batch["text"]
+                    labels = torch.tensor([_label[0] for _label in batch["labels"]]) if args.jacobian_single_target else None
                 elif args.dataset_name == 'speech_commands':
                     inputs = batch["input_values"].to(args.device)
-                # elif args.dataset_name == 'coco':
-                #     inputs = batch[0].to(args.device)
-
-                if any([_m in ['cosine-similarity', 'cka-similarity'] for _m in args.mode]) or 'block-influence' in args.prune_by:
+                    labels = batch["label"] if args.jacobian_single_target else None
+                elif args.dataset_name == 'coco':
+                    inputs = {k: v.to(args.device) for k, v in loaders["test"].dataset.__get_batch_repr__(batch).items()}
+                    labels = None
+                    
+                if any([_m in ['cosine-similarity', 'cka-similarity', 'procrustes-similarity'] for _m in args.mode]) or 'block-influence' in args.prune_by:
                     pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing feature similarities...") # set pbar description
 
                     # Extract intermediate features (within and between transformer encoder blocks)
@@ -142,6 +146,16 @@ if __name__ == '__main__':
                         # Store block inference scores
                         results['all-block-influences'].append(bi_scores)
 
+                    if 'procrustes-similarity' in args.mode:
+                        # Extract features for withing and between encoder blocks
+                        within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
+                        between_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[1::2]]).permute(1,0,2)
+
+                        proc_sims_between = [procrustes_similarity(between_features[:, k, :], between_features[:, k+1, :])[0] for k in range(analyzer.num_layers - 1)]
+                        proc_sims_within = [procrustes_similarity(within_features[:, k, :], within_features[:, k+1, :])[0] for k in range(analyzer.num_layers - 1)]
+
+                        results['all-procrustes-similarities'].append({'within': proc_sims_within, 'between': proc_sims_between})
+                                                                            
                     if 'cosine-similarity' in args.mode:
                         # Extract features for withing and between encoder blocks
                         within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
@@ -182,7 +196,7 @@ if __name__ == '__main__':
                         # Get intermediate representations, operations and intermediates (+ features)
                         operations, intermediates, info = analyzer.__element_wise_breakdown__(inputs, from_layer=k, within_block=args.within_block)
                         # Compute Jacobian for each data point in the batch
-                        J = __compute_jacobian__(analyzer, intermediates=intermediates, operations=operations, pbar=pbar, current_iteration=current_iteration, k=k, info=info, base_desc=base_desc, **args.__dict__)
+                        J = __compute_jacobian__(analyzer, intermediates=intermediates, operations=operations, target_labels=labels, pbar=pbar, current_iteration=current_iteration, k=k, info=info, base_desc=base_desc, **args.__dict__)
                         
                         # Store Jacobians for computing similarities between layers
                         if args.jacobian_between_layers:
@@ -212,6 +226,8 @@ if __name__ == '__main__':
                     break
                 current_iteration += 1
                 pbar.update(1)
+
+
 
     current_iteration = 0
     pbar = tqdm(total=args.max_iter)
@@ -272,6 +288,41 @@ if __name__ == '__main__':
                             # Compute accuracy
                             preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
                             results['accuracy']['forward'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+
+                    if args.custom_pruning != []:
+                        pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing customly pruned accuracies...") # set pbar description
+
+                        _prune_order = torch.tensor(args.custom_pruning)
+                        for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                            # Prune model by forward
+                            if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                _model, _ = analyzer.load_model()
+                                _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
+                            else:
+                                _model, _ = analyzer.load_model()
+                                _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
+
+                            # Compute accuracy
+                            preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                            results['accuracy']['custom'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+
+                    if 'forward-backward' in args.prune_by:
+                        pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing forward/backward-pruned accuracies...") # set pbar description
+
+                        # Compute prune order                        
+                        _prune_order = torch.tensor([k//2 if i%2 == 0 else analyzer.num_layers - k//2 for (i, k) in enumerate(range(2, analyzer.num_layers+1))])
+                        for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                            # Prune model by forward
+                            if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                _model, _ = analyzer.load_model()
+                                _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
+                            else:
+                                _model, _ = analyzer.load_model()
+                                _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount].numpy(), reverse=True)) # remove later layers first according to block inference scores
+
+                            # Compute accuracy
+                            preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                            results['accuracy']['forward-backward'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                     if 'block-influence' in args.prune_by:
                         pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing BI-pruned accuracies...") # set pbar description

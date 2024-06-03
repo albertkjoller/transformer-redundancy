@@ -17,31 +17,38 @@ def extract_features(inputs, analyzer: LayerWiseAnalysis, register_intermediate:
     
     return features, features.keys().__len__()
 
-def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwargs):
+def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, target_labels: int = None, **kwargs):
 
     if kwargs['dataset_name'] == 'imagenet-1k':
         num_classes = 1000
         mini_batches = num_classes // kwargs['c_per_iter']
         
         # Prepare structure
-        Js = torch.zeros((kwargs['batch_size'], intermediates.flatten(1).shape[1] * num_classes))
+        Js = torch.zeros((kwargs['batch_size'], intermediates.flatten(1).shape[1] * num_classes)) if target_labels is None else torch.zeros((kwargs['batch_size'], intermediates.flatten(1).shape[1]))
         for _idx, _z in enumerate(intermediates):    
-            _Js = []
-            for i in range(mini_batches):
-                kwargs['pbar'].set_description(kwargs['base_desc'] + f"Processing {_idx+1}/{kwargs['batch_size']} batch idx - " + f"(class {kwargs['c_per_iter']*(i+1)}/{num_classes})") # update pbar info
-                
-                # Define function (batched on classes due to memory constraints)
-                _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations)[:, i*kwargs['c_per_iter']:(i+1)*kwargs['c_per_iter']]
-                # Compute Jacobian per input for selected classes
-                J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z.unsqueeze(0))
-                _Js.append(J.cpu().squeeze([0,1]).flatten(1))
-                
-                # Free cache
-                torch.cuda.empty_cache()
+            if target_labels is not None:
+                kwargs['pbar'].set_description(kwargs['base_desc'] + f"Processing {_idx+1}/{kwargs['batch_size']} batch idx") # update pbar info
 
-            # Add to storage
-            Js[_idx] = torch.stack(_Js).flatten().unsqueeze(0)
-    
+                _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations)[:, target_labels[_idx]].unsqueeze(0)
+                J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z.unsqueeze(0))
+                Js[_idx] = J.cpu().squeeze([0,1]).flatten().unsqueeze(0)
+            else:
+                _Js = []
+                for i in range(mini_batches):
+                    kwargs['pbar'].set_description(kwargs['base_desc'] + f"Processing {_idx+1}/{kwargs['batch_size']} batch idx - " + f"(class {kwargs['c_per_iter']*(i+1)}/{num_classes})") # update pbar info
+                    
+                    # Define function (batched on classes due to memory constraints)
+                    _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations)[:, i*kwargs['c_per_iter']:(i+1)*kwargs['c_per_iter']]
+                    # Compute Jacobian per input for selected classes
+                    J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z.unsqueeze(0))
+                    _Js.append(J.cpu().squeeze([0,1]).flatten(1))
+                    
+                    # Free cache
+                    torch.cuda.empty_cache()
+
+                # Add to storage
+                Js[_idx] = torch.stack(_Js).flatten().unsqueeze(0)
+
     else:
         if kwargs['dataset_name'] == 'go_emotions':
             num_classes = 28
@@ -50,7 +57,7 @@ def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwar
             num_classes = 35
             feature_size = intermediates.flatten(1).shape[1]
         
-        Js = torch.zeros((kwargs['batch_size'], feature_size * num_classes))
+        Js = torch.zeros((kwargs['batch_size'], feature_size * num_classes)) if target_labels is None else torch.zeros((kwargs['batch_size'], feature_size))
         for _idx, _z in enumerate(intermediates):    
             kwargs['pbar'].set_description(kwargs['base_desc'] + f"Processing {_idx+1}/{kwargs['batch_size']} batch idx") # update pbar info
 
@@ -60,13 +67,19 @@ def __compute_jacobian__(analyzer, intermediates: dict, operations: dict, **kwar
 
             if kwargs['dataset_name'] == 'go_emotions':
                 # Define function (batched on classes due to memory constraints)
-                _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0).unsqueeze(0), operations, attention_outputs=attention_output)[:, :num_classes]
+                if target_labels is None:
+                    _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0).unsqueeze(0), operations, attention_outputs=attention_output)[:, :num_classes]
+                else:
+                    _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0).unsqueeze(0), operations, attention_outputs=attention_output)[:, target_labels[_idx]].unsqueeze(0)
                 # Compute Jacobian per input for selected classes
                 J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z).cpu().squeeze([0,1])
 
             elif kwargs['dataset_name'] == 'speech_commands':
                 # Define function (batched on classes due to memory constraints)
-                _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations, attention_outputs=attention_output, **{'position_bias': position_bias})
+                if target_labels is None:
+                    _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations, attention_outputs=attention_output, **{'position_bias': position_bias})
+                else:
+                    _func = lambda x: analyzer.__get_output_from__(x.unsqueeze(0), operations, attention_outputs=attention_output, **{'position_bias': position_bias})[:, target_labels[_idx]].unsqueeze(0)
                 # Compute Jacobian per input for selected classes
                 J = torch.vmap(torch.func.jacrev(_func), chunk_size=kwargs['jacobian_chunk_size'])(_z.unsqueeze(0)).cpu().squeeze([0,1])
             

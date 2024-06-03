@@ -21,7 +21,7 @@ def process_dataset(example, processor):
     processed["input_values"] = processed["input_values"].squeeze()
     return processed
 
-def get_speech_commands_loaders(model_name: str, batch_size: int, num_proc: int = 1, seed: int = 0, splits=["test"]):
+def get_speech_commands_loaders(model_name: str, batch_size: int, num_proc: int = 1, seed: int = 0, splits=["validation", "test"]):
 
     # Load processor
     processor = load_processor(model_name)
