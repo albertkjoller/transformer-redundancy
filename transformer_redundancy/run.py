@@ -6,6 +6,7 @@ from transformer_redundancy.models.audio import *
 from transformer_redundancy.methods.utils import extract_features, __compute_jacobian__, prune_model_by_heuristic, prune_model_backward
 from transformer_redundancy.methods.cka import compute_cka_from_tensors
 from transformer_redundancy.methods.procrustes import procrustes_similarity
+from transformer_redundancy.methods.mutual_knn import mutual_knn
 
 def get_domain(args):
     if args.dataset_name in ['imagenet-1k']:
@@ -42,7 +43,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run Visual Transformer experiments.')
     ### Experiment parameters ###
-    parser.add_argument('mode', type=str, nargs='+', choices=['pruning-performance', 'cosine-similarity', 'cka-similarity', 'jacobian-similarity', 'procrustes-similarity'])
+    parser.add_argument('mode', type=str, nargs='+', choices=['pruning-performance', 'cosine-similarity', 'cka-similarity', 'jacobian-similarity', 'procrustes-similarity', 'mutual-knn'])
     parser.add_argument('--within-block', action='store_true')
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
@@ -71,7 +72,7 @@ if __name__ == '__main__':
     # Load environment variables
     load_dotenv()
     login(os.getenv('HF_TOKEN'))
-    os.environ["HF_HOME"] = os.getenv('HF_HOME')
+    # os.environ["HF_HOME"] = os.getenv('HF_HOME')
 
     # Clear pytorch cache
     torch.cuda.empty_cache()
@@ -93,12 +94,14 @@ if __name__ == '__main__':
         'accuracy': {k: defaultdict(list) for k in args.prune_by + ['custom']},
         'all-cosine-similarities': [],
         'all-cka-similarities': [],
+        'all-mutual_knn-similarities': {'within': [], 'between': []},
         'all-procrustes-similarities': [],
         'all-block-influences': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
     }
 
+    ### FEATURE EXTRACTION AND SIMILARITY COMPUTATION ###
     current_iteration = 0
     args.max_iter = args.max_iter + args.start_iter
     pbar = tqdm(total=args.max_iter)
@@ -122,7 +125,7 @@ if __name__ == '__main__':
                     inputs = {k: v.to(args.device) for k, v in loaders["test"].dataset.__get_batch_repr__(batch).items()}
                     labels = None
                     
-                if any([_m in ['cosine-similarity', 'cka-similarity', 'procrustes-similarity'] for _m in args.mode]) or 'block-influence' in args.prune_by:
+                if any([_m in ['cosine-similarity', 'cka-similarity', 'procrustes-similarity', 'mutual-knn'] for _m in args.mode]) or 'block-influence' in args.prune_by:
                     pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing feature similarities...") # set pbar description
 
                     # Extract intermediate features (within and between transformer encoder blocks)
@@ -149,10 +152,12 @@ if __name__ == '__main__':
                     if 'procrustes-similarity' in args.mode:
                         # Extract features for withing and between encoder blocks
                         within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
+                        # within_features = torch.stack([features[f'layer{i}'].mean(dim=1).flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
                         between_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[1::2]]).permute(1,0,2)
+                        # between_features = torch.stack([features[f'layer{i}'].mean(dim=1).flatten(1) for i in range(n_feature_layers)[1::2]]).permute(1,0,2)
 
-                        proc_sims_between = [procrustes_similarity(between_features[:, k, :], between_features[:, k+1, :])[0] for k in range(analyzer.num_layers - 1)]
                         proc_sims_within = [procrustes_similarity(within_features[:, k, :], within_features[:, k+1, :])[0] for k in range(analyzer.num_layers - 1)]
+                        proc_sims_between = [procrustes_similarity(between_features[:, k, :], between_features[:, k+1, :])[0] for k in range(analyzer.num_layers - 1)]
 
                         results['all-procrustes-similarities'].append({'within': proc_sims_within, 'between': proc_sims_between})
                                                                             
@@ -187,6 +192,20 @@ if __name__ == '__main__':
                         
                         cka_similarities += cka_similarities.T + torch.eye(n_feature_layers) # Symmetrize
                         results['all-cka-similarities'].append(cka_similarities)
+
+                    if 'mutual-knn' in args.mode:
+
+                        within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
+                        between_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[1::2]]).permute(1,0,2)
+
+                        top_ks = [1, 3, 5, 10, 20, 40, 60]
+                        for _feats_type, _feats in [('within', within_features), ('between', between_features)]:
+                            mutual_knn_sims = {_k: torch.zeros((analyzer.num_layers, analyzer.num_layers)) for _k in top_ks}
+                            for _top_k in top_ks:
+                                for _i in range(analyzer.num_layers):
+                                    for _j in range(_i, analyzer.num_layers):
+                                        mutual_knn_sims[_top_k][_i, _j] = mutual_knn_sims[_top_k][_j, _i] = mutual_knn(_feats[:, _i, :], _feats[:, _j, :], topk=_top_k)
+                            results['all-mutual_knn-similarities'][_feats_type].append(mutual_knn_sims)
 
                 if 'jacobian-similarity' in args.mode:
                     jacobians, jacobian_similarities_batch = {}, {}
@@ -229,6 +248,8 @@ if __name__ == '__main__':
 
 
 
+
+    ### PRUNING PERFORMANCE ###
     current_iteration = 0
     pbar = tqdm(total=args.max_iter)
     if 'pruning-performance' in args.mode:
