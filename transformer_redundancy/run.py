@@ -48,9 +48,10 @@ if __name__ == '__main__':
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
     parser.add_argument('--jacobian-single-target', action='store_true')
-    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'forward-backward', 'block-influence', 'jacobian-rank'], default=[])
+    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'forward-backward', 'block-influence', 'knn-block-influence', 'multi-block-influence', 'jacobian-rank'], default=[])
     parser.add_argument('--prune-amount-range', nargs='+', type=int, help='Number of layers to prune.', default=[])
     parser.add_argument('--custom-pruning', nargs='+', type=int, help='Order.', default=[])
+    parser.add_argument('--layers-core-first', nargs='+', type=int, help='Index.', default=[])
     parser.add_argument('--c-per-iter', type=int, default=20)
     parser.add_argument('--max-iter', type=int, default=50)
     parser.add_argument('--start-iter', type=int, default=0)
@@ -91,12 +92,15 @@ if __name__ == '__main__':
 
     # Setup storage system
     results = {
-        'accuracy': {k: defaultdict(list) for k in args.prune_by + ['custom']},
+        'accuracy': {k: defaultdict(list) for k in args.prune_by + ['custom', 'core-first-block-influence']},
         'all-cosine-similarities': [],
         'all-cka-similarities': [],
         'all-mutual_knn-similarities': {'within': [], 'between': []},
         'all-procrustes-similarities': [],
         'all-block-influences': [],
+        'all-core-last-block-influences': [],
+        'all-knn-block-influences': [],
+        'all-multi-block-influences': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
     }
@@ -149,6 +153,21 @@ if __name__ == '__main__':
                         # Store block inference scores
                         results['all-block-influences'].append(bi_scores)
 
+                    if 'knn-block-influence' in args.prune_by:
+                        assert not args.within_block, "Block inference scores can only be computed between blocks."
+                        features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
+
+                        knn_bi = torch.stack([torch.tensor([1 - mutual_knn(features_between_blocks[_layer].flatten(1), features_between_blocks[_layer+1].flatten(1), topk=_k) for _layer in range(analyzer.num_layers - 1)]) for _k in [2, 4, 8, 16, 32, 64]])
+                        results['all-knn-block-influences'].append(knn_bi)
+
+                    if 'multi-block-influence' in args.prune_by:
+                        assert not args.within_block, "Block inference scores can only be computed between blocks."
+                        features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
+
+                        knn_mbi = torch.stack([torch.stack([torch.tensor([1 - mutual_knn(features_between_blocks[layer_i].flatten(1), features_between_blocks[layer_j].flatten(1), topk=_k) for layer_i in range(analyzer.num_layers)]) for layer_j in range(analyzer.num_layers)]) for _k in [2, 4, 8, 16, 32, 64]])
+                        knn_mbi = knn_mbi.mean(dim=1)
+                        results['all-multi-block-influences'].append(knn_mbi)
+
                     if 'procrustes-similarity' in args.mode:
                         # Extract features for withing and between encoder blocks
                         within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
@@ -198,10 +217,11 @@ if __name__ == '__main__':
                         within_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[::2]]).permute(1,0,2)
                         between_features = torch.stack([features[f'layer{i}'].flatten(1) for i in range(n_feature_layers)[1::2]]).permute(1,0,2)
 
-                        top_ks = [1, 3, 5, 10, 20, 40, 60]
+                        top_ks = [2**i for i in range(10) if 2**i <= args.batch_size]
                         for _feats_type, _feats in [('within', within_features), ('between', between_features)]:
                             mutual_knn_sims = {_k: torch.zeros((analyzer.num_layers, analyzer.num_layers)) for _k in top_ks}
                             for _top_k in top_ks:
+                                pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Mutual kNN ({_feats_type} - k={_top_k})") # set pbar description
                                 for _i in range(analyzer.num_layers):
                                     for _j in range(_i, analyzer.num_layers):
                                         mutual_knn_sims[_top_k][_i, _j] = mutual_knn_sims[_top_k][_j, _i] = mutual_knn(_feats[:, _i, :], _feats[:, _j, :], topk=_top_k)
@@ -256,7 +276,7 @@ if __name__ == '__main__':
         if args.prune_amount_range == []:
             args.prune_amount_range = [0, analyzer.num_layers]
 
-        assert args.prune_by != [], "Prune by must be specified to compute performance."
+        assert args.prune_by != [] or args.custom_pruning != [], "Prune by must be specified to compute performance."
         save_filename += f'_pruned-by={args.prune_by}'
 
         with torch.no_grad():
@@ -362,6 +382,64 @@ if __name__ == '__main__':
                             # Compute accuracy
                             preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
                             results['accuracy']['block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+
+                        if args.layers_core_first != []:
+                            pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing core-first BI-pruned accuracies...") # set pbar description
+
+                            # Remove core layers first
+                            _prune_order = list(_prune_order.numpy())
+                            for _l in args.layers_core_first:
+                                _prune_order.remove(_l)
+                            # Define new pruning order
+                            _prune_order = args.layers_core_first + _prune_order
+                            for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                                # Prune model by block inference scores
+                                if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                    _model, _ = analyzer.load_model()
+                                    _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                                else:
+                                    _model, _ = analyzer.load_model()
+                                    _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+
+                                # Compute accuracy
+                                preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                                results['accuracy']['core-first-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+
+                    if 'knn-block-influence' in args.prune_by:
+                        pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing kNN-BI-pruned accuracies...") # set pbar description
+
+                        # Compute prune order
+                        _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-knn-block-influences']), dim=0), descending=False) + 1 # Skip first layer
+                        for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                            # Prune model by block inference scores
+                            if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                _model, _ = analyzer.load_model()
+                                _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                            else:
+                                _model, _ = analyzer.load_model()
+                                _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+
+                            # Compute accuracy
+                            preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                            results['accuracy']['knn-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+
+                    if 'multi-block-influence' in args.prune_by:
+                        pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing kNN-mBI-pruned accuracies...") # set pbar description
+
+                        # Compute prune order
+                        _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-multi-block-influences']), dim=0), descending=False) + 1 # Skip first layer
+                        for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                            # Prune model by block inference scores
+                            if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                _model, _ = analyzer.load_model()
+                                _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                            else:
+                                _model, _ = analyzer.load_model()
+                                _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+
+                            # Compute accuracy
+                            preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                            results['accuracy']['multi-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                     if 'jacobian-rank' in args.prune_by:
                         assert 'jacobian-similarity' in args.mode, "Jacobian similarity scores can only be computed with Jacobian similarities."
