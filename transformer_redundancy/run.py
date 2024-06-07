@@ -48,7 +48,7 @@ if __name__ == '__main__':
     parser.add_argument('--jacobian-between-layers', action='store_true')
     parser.add_argument('--jacobian-chunk-size', type=int, default=1)
     parser.add_argument('--jacobian-single-target', action='store_true')
-    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'forward-backward', 'block-influence', 'knn-block-influence', 'multi-block-influence', 'jacobian-rank'], default=[])
+    parser.add_argument('--prune-by', nargs='+', choices=['backward', 'forward', 'forward-backward', 'block-influence', 'knn-block-influence', 'multi-block-influence', 'jacobian-rank', 'adaptive-block-influence', 'adaptive-knn-block-influence'], default=[])
     parser.add_argument('--prune-amount-range', nargs='+', type=int, help='Number of layers to prune.', default=[])
     parser.add_argument('--custom-pruning', nargs='+', type=int, help='Order.', default=[])
     parser.add_argument('--layers-core-first', nargs='+', type=int, help='Index.', default=[])
@@ -100,6 +100,8 @@ if __name__ == '__main__':
         'all-block-influences': [],
         'all-core-last-block-influences': [],
         'all-knn-block-influences': [],
+        'all-adaptive-block-influences': [],
+        'all-adaptive-knn-block-influences': [],
         'all-multi-block-influences': [],
         'all-jacobian-batch-similarities': [],
         'all-jacobian-layer-similarities': [],
@@ -131,8 +133,77 @@ if __name__ == '__main__':
                     
                 if any([_m in ['cosine-similarity', 'cka-similarity', 'procrustes-similarity', 'mutual-knn'] for _m in args.mode]) or 'block-influence' in args.prune_by:
                     pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing feature similarities...") # set pbar description
+                    
+                    if 'adaptive-block-influence' in args.prune_by or 'adaptive-knn-block-influence' in args.prune_by:
+                        if 'adaptive-block-influence' in args.prune_by:
+                            assert not args.within_block, "Block inference scores can only be computed between blocks."
+                            
+                            _analyzer, done = get_analyzer(args), False 
+                            _prune_order, all_layers = [], list(range(analyzer.num_layers))
+                            while not done:
+                                # Extract intermediate features (within and between transformer encoder blocks) for
+                                features, n_feature_layers = extract_features(inputs, _analyzer, register_intermediate=args.within_block)
+                                features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
 
-                    # Extract intermediate features (within and between transformer encoder blocks)
+                                # Compute block inference scores
+                                _bi_scores = torch.zeros((args.batch_size, _analyzer.num_layers - 1))
+                                for layer_i in range(_analyzer.num_layers - 1):
+                                    # Compute elements of block inference scores                        
+                                    dot_prod = torch.einsum('id,id->i', features_between_blocks[layer_i].flatten(1), features_between_blocks[layer_i+1].flatten(1))
+                                    norm_before = torch.linalg.norm(features_between_blocks[layer_i].flatten(1), ord=2, dim=1)
+                                    norm_after = torch.linalg.norm(features_between_blocks[layer_i+1].flatten(1), ord=2, dim=1)
+                                    # Compute block inference scores
+                                    _bi_scores[:, layer_i] = 1 - dot_prod / (norm_before * norm_after)
+
+                                # Prune layer with lowest block inference score
+                                layer2remove = torch.mean(_bi_scores, dim=0).argmin().item() + 1 # Indexed at first layer
+                                orig_layer2remove = all_layers[layer2remove]
+                                if _prune_order == []:
+                                    classic_bi = torch.argsort(torch.mean(_bi_scores, dim=0), descending=False) + 1
+                                
+                                # Prune model
+                                del _analyzer.model.base_model.encoder.layers[layer2remove] # Prune layer with lowest block inference score
+                                _analyzer.num_layers -= 1
+                                
+                                # Update prune order and remaining layers
+                                _prune_order.append(orig_layer2remove)
+                                all_layers.remove(orig_layer2remove)
+                                done = _analyzer.num_layers == 1
+
+                            results['all-adaptive-block-influences'].append(_prune_order)
+
+                        if 'adaptive-knn-block-influence' in args.prune_by:
+                            assert not args.within_block, "Block inference scores can only be computed between blocks."
+                            
+                            _analyzer, done = get_analyzer(args), False 
+                            _prune_order, all_layers = [], list(range(analyzer.num_layers))
+                            while not done:
+                                # Extract intermediate features (within and between transformer encoder blocks) for
+                                features, n_feature_layers = extract_features(inputs, _analyzer, register_intermediate=args.within_block)
+                                features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
+
+                                # Compute block inference scores (mutual knn)
+                                _knn_bi = torch.stack([torch.tensor([1 - mutual_knn(features_between_blocks[_layer].flatten(1), features_between_blocks[_layer+1].flatten(1), topk=_k) for _layer in range(_analyzer.num_layers - 1)]) for _k in [2, 4, 8, 16, 32, 64]])
+
+                                # Prune layer with lowest block inference score
+                                layer2remove = torch.mean(_knn_bi, dim=0).argmin().item() + 1 # Indexed at first layer
+                                orig_layer2remove = all_layers[layer2remove]
+                                if _prune_order == []:
+                                    classic_knn_bi = torch.argsort(torch.mean(_knn_bi, dim=0), descending=False) + 1
+                                
+                                # Prune model
+                                del _analyzer.model.base_model.encoder.layers[layer2remove] # Prune layer with lowest block inference score
+                                _analyzer.num_layers -= 1
+                                
+                                # Update prune order and remaining layers
+                                _prune_order.append(orig_layer2remove)
+                                all_layers.remove(orig_layer2remove)
+                                done = _analyzer.num_layers == 1
+
+                            results['all-adaptive-knn-block-influences'].append(_prune_order)
+
+
+                    # Extract stationary intermediate features (within and between transformer encoder blocks) for remaining approaches
                     features, n_feature_layers = extract_features(inputs, analyzer, register_intermediate=args.within_block)
 
                     # Compute block inference scores
@@ -152,7 +223,7 @@ if __name__ == '__main__':
                         
                         # Store block inference scores
                         results['all-block-influences'].append(bi_scores)
-
+                            
                     if 'knn-block-influence' in args.prune_by:
                         assert not args.within_block, "Block inference scores can only be computed between blocks."
                         features_between_blocks = {i: features[f"layer{k}"] for i, k in enumerate(range(n_feature_layers))}
@@ -369,7 +440,7 @@ if __name__ == '__main__':
                         pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing BI-pruned accuracies...") # set pbar description
 
                         # Compute prune order
-                        _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-block-influences']), dim=0), descending=False) + 1 # Skip first layer
+                        _prune_order = torch.argsort(torch.mean(torch.vstack(results['all-block-influences']), dim=0), descending=False) + 1 # Indexed at first layer
                         for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
                             # Prune model by block inference scores
                             if args.model_name == 'SamLowe/roberta-base-go_emotions':
@@ -404,6 +475,23 @@ if __name__ == '__main__':
                                 # Compute accuracy
                                 preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
                                 results['accuracy']['core-first-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+                    
+                    if 'adaptive-block-influence' in args.prune_by:
+                        pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing adaptive BI-pruned accuracies...") # set pbar description
+
+                        _prune_order = torch.mode(torch.tensor(results['all-adaptive-block-influences']), dim=0).values # Majority voting
+                        for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                            # Prune model by block inference scores
+                            if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                _model, _ = analyzer.load_model()
+                                _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                            else:
+                                _model, _ = analyzer.load_model()
+                                _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+
+                            # Compute accuracy
+                            preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                            results['accuracy']['adaptive-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                     if 'knn-block-influence' in args.prune_by:
                         pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing kNN-BI-pruned accuracies...") # set pbar description
@@ -422,6 +510,23 @@ if __name__ == '__main__':
                             # Compute accuracy
                             preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
                             results['accuracy']['knn-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
+
+                    if 'adaptive-knn-block-influence' in args.prune_by:
+                        pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing adaptive kNN-BI-pruned accuracies...") # set pbar description
+                        
+                        _prune_order = torch.mode(torch.tensor(results['all-adaptive-knn-block-influences']), dim=0).values # Majority voting
+                        for _prune_amount in range(args.prune_amount_range[0], min(len(_prune_order), args.prune_amount_range[1])):
+                            # Prune model by block inference scores
+                            if args.model_name == 'SamLowe/roberta-base-go_emotions':
+                                _model, _ = analyzer.load_model()
+                                _model.model = prune_model_by_heuristic(_model.model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+                            else:
+                                _model, _ = analyzer.load_model()
+                                _model = prune_model_by_heuristic(_model, layers_to_prune=sorted(_prune_order[:_prune_amount], reverse=True)) # remove later layers first according to block inference scores
+
+                            # Compute accuracy
+                            preds = torch.tensor([label2cat[pred[0]["label"]] for pred in _model(inputs)]) if args.dataset_name == 'go_emotions' else torch.argmax(_model(inputs).logits, dim=1).cpu()
+                            results['accuracy']['adaptive-knn-block-influence'][_prune_amount].append((preds == labels).sum().item() / args.batch_size)
 
                     if 'multi-block-influence' in args.prune_by:
                         pbar.set_description(f"Iteration {current_iteration}/{args.max_iter}: Computing kNN-mBI-pruned accuracies...") # set pbar description
@@ -475,4 +580,8 @@ if __name__ == '__main__':
                     pbar.update(1)
 
     os.makedirs(f"{args.save_path}/{domain}/{args.model_name.split('/')[-1]}", exist_ok=True)
-    torch.save(results, save_filename + f'_results.pth')
+    try:
+        torch.save(results, save_filename + f'_results.pth')
+    except RuntimeError:
+        print("Results could not be saved with correct filename - please rename manually!!.")
+        torch.save(results, f"{args.save_path}/{domain}/{args.model_name.split('/')[-1]}/TEMP_NAME_results.pth")
