@@ -60,6 +60,7 @@ if __name__ == '__main__':
     ### Data parameters ###
     parser.add_argument('--dataset-name', type=str, choices=['coco', 'imagenet-1k', 'go_emotions', 'speech_commands'])
     parser.add_argument('--coco-path', type=str, default=None)
+    parser.add_argument('--num_proc', type=int, default=1)
     parser.add_argument('--processor-name', type=str)
     parser.add_argument('--batch-size', type=int, default=128)
     ### Model parameters ###
@@ -162,7 +163,10 @@ if __name__ == '__main__':
                                     classic_bi = torch.argsort(torch.mean(_bi_scores, dim=0), descending=False) + 1
                                 
                                 # Prune model
-                                del _analyzer.model.base_model.encoder.layers[layer2remove] # Prune layer with lowest block inference score
+                                if 'wav' in args.model_name:
+                                    del _analyzer.model.base_model.encoder.layers[layer2remove] # Prune layer with lowest block inference score
+                                else:
+                                    del _analyzer.model.base_model.encoder.layer[layer2remove] # Prune layer with lowest block inference score
                                 _analyzer.num_layers -= 1
                                 
                                 # Update prune order and remaining layers
@@ -192,7 +196,10 @@ if __name__ == '__main__':
                                     classic_knn_bi = torch.argsort(torch.mean(_knn_bi, dim=0), descending=False) + 1
                                 
                                 # Prune model
-                                del _analyzer.model.base_model.encoder.layers[layer2remove] # Prune layer with lowest block inference score
+                                if 'wav' in args.model_name:
+                                    del _analyzer.model.base_model.encoder.layers[layer2remove] # Prune layer with lowest block inference score
+                                else:
+                                    del _analyzer.model.base_model.encoder.layer[layer2remove] # Prune layer with lowest block inference score
                                 _analyzer.num_layers -= 1
                                 
                                 # Update prune order and remaining layers
