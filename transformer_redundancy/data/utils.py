@@ -15,4 +15,4 @@ def get_loaders(dataset_name: str, batch_size: int=32, seed: int=0, **kwargs):
         processor = CLIPProcessor.from_pretrained(kwargs['processor_name'])
         return get_coco_loaders(data_path_str=kwargs['coco_path'], processor=processor, batch_size=batch_size, seed=seed, dset_tags=['val2017']), {}
     elif dataset_name == 'speech_commands':
-        return get_speech_commands_loaders(model_name=kwargs['model_name'], batch_size=batch_size, seed=seed, num_proc=kwargs['num_proc']), {}
+        return get_speech_commands_loaders(model_name=kwargs['model_name'], batch_size=batch_size, seed=seed, num_proc=kwargs['num_proc'], splits=kwargs.get("splits", ["validation", "test"]), shuffle=kwargs.get("shuffle", False)), {}

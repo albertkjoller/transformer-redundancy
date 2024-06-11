@@ -28,7 +28,7 @@ class BeitForLayerwiseAnalysis(LayerWiseAnalysis):
                 self.features[name] = output
         return hook
     
-    def __register_hooks__(self, register_intermediate: bool = False):
+    def __register_hooks__(self, register_intermediate: bool = False, **kwargs):
         self.features = {}
         self._hooks_registed = True
 

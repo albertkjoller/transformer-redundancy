@@ -8,7 +8,7 @@ class LayerWiseAnalysis:
     def load_model(self):
         raise NotImplementedError("Method 'load_model' must be implemented in derived classes.")
 
-    def __register_hooks__(self, get_features: callable, register_intermediate: bool = False):
+    def __register_hooks__(self, get_features: callable, register_intermediate: bool = False, **kwargs):
         raise NotImplementedError("Method '__register_hooks__' must be implemented in derived classes.")
     
     def __get_intermediate__(self, inputs, __elements__, from_layer: int, model_name: str):

@@ -28,7 +28,7 @@ class RoBERTaForLayerwiseAnalysis(LayerWiseAnalysis):
                 self.features[name].append(output[0].detach().cpu().mean(dim=1))
         return hook
     
-    def __register_hooks__(self, register_intermediate: bool = False):
+    def __register_hooks__(self, register_intermediate: bool = False, **kwargs):
         self.features = defaultdict(list)
         self._hooks_registed = True
 

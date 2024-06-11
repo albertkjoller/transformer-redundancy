@@ -39,7 +39,7 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
                 self.features[name] = output
         return hook
     
-    def __register_hooks__(self, register_intermediate: bool = False):
+    def __register_hooks__(self, register_intermediate: bool = False, layers: list = None, register_init_embedding: bool = False, **kwargs):
         self.features = {}
         self._hooks_registed = True
 
@@ -47,7 +47,14 @@ class WavLMForLayerwiseAnalysis(LayerWiseAnalysis):
         layer_name = 0
         handles = []
         self._register_intermediate = register_intermediate
-        for layer_idx in range(self.num_layers):
+
+        if layers is None:
+            layers = range(self.num_layers)
+        
+        if register_init_embedding:
+            handles.append(self.model.wavlm.feature_projection.register_forward_hook(self.get_features("feature_projection")))
+
+        for layer_idx in layers:
             if register_intermediate:
                 handles.append(self.model.wavlm.encoder.layers[layer_idx].feed_forward.register_forward_hook(self.get_features(f"layer{layer_name}")))
                 handles.append(self.model.wavlm.encoder.layers[layer_idx].register_forward_hook(self.get_features(f"layer{layer_name + 1}")))

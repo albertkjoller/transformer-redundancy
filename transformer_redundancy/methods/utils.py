@@ -1,9 +1,9 @@
 import torch
 from ..models.layerwise import LayerWiseAnalysis
 
-def extract_features(inputs, analyzer: LayerWiseAnalysis, register_intermediate: bool = True):
+def extract_features(inputs, analyzer: LayerWiseAnalysis, register_intermediate: bool = True, layers: list = None, register_init_embedding: bool = False):
     # Get features
-    handles = analyzer.__register_hooks__(register_intermediate=register_intermediate)
+    handles = analyzer.__register_hooks__(register_intermediate=register_intermediate, layers=layers, register_init_embedding=register_init_embedding)
     # Get intermediate representations, operations and intermediates (+ features)
     _, _, _ = analyzer.__element_wise_breakdown__(inputs, from_layer=0, within_block=False)
     

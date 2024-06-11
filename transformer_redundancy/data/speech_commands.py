@@ -42,7 +42,7 @@ def prepare_dataset_speaker(dataset, processor, num_proc: int = 1):
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     return dataset["train"], dataset["test"]
 
-def get_speech_commands_loaders(model_name: str, batch_size: int, num_proc: int = 1, seed: int = 0, splits=["validation", "test"]):
+def get_speech_commands_loaders(model_name: str, batch_size: int, num_proc: int = 1, seed: int = 0, splits=["validation", "test"], shuffle: bool = False):
 
     # Load processor
     processor = load_processor(model_name)
@@ -61,14 +61,14 @@ def get_speech_commands_loaders(model_name: str, batch_size: int, num_proc: int 
             _dset.set_format(type="torch", columns=["input_values", "label"])
             
             # Create DataLoader
-            loaders[split] = DataLoader(_dset, batch_size=batch_size, shuffle=False)
+            loaders[split] = DataLoader(_dset, batch_size=batch_size, shuffle=shuffle)
 
     else:
 
         # Shuffle the dataset split
         _dset = dataset["train"].shuffle(seed=seed)
         train_dataset, eval_dataset = prepare_dataset_speaker(_dset, processor, num_proc=num_proc)
-        loaders["train"] = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-        loaders["validation"] = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False)
+        loaders["train"] = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+        loaders["validation"] = DataLoader(eval_dataset, batch_size=batch_size, shuffle=shuffle)
 
     return loaders

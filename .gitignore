@@ -89,3 +89,8 @@ target/
 .mypy_cache/
 
 /models/
+
+*.pth
+experiments
+temp*
+experiments*
