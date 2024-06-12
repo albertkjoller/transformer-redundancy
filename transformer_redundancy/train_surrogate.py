@@ -50,7 +50,25 @@ class FeatureReproducingModel(nn.Module):
         last_hidden_states = self.final_linear_probe(self.relu(self.layer_norm(self.final_representation_encoder(intermediate_hidden_states))))
         return intermediate_hidden_states, last_hidden_states
 
+
+class TransformerBasedMimicker(nn.Module):
+
+    def __init__(self, embedding_dim: int, hidden_dim: int = 768, **kwargs):
+        super(TransformerBasedMimicker, self).__init__()
+
+        self.intermediate_transformer_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
+        )
+        self.last_transformer_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
+        )
+        
+    def forward(self, x):
+        intermediate_hidden_states = self.intermediate_transformer_layer(x)
+        last_hidden_states = self.last_transformer_layer(intermediate_hidden_states)
+        return intermediate_hidden_states, last_hidden_states
     
+
 if __name__ == '__main__':
     
     import os
@@ -62,6 +80,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run Visual Transformer experiments.')
     ### Experiment parameters ###
+    parser.add_argument('--surrogate-type', type=str, default='linear', choices=['linear', 'transformer'])
     parser.add_argument('--val-every', type=int, default=50)
     parser.add_argument('--num-val-batches', type=int, default=None)
     parser.add_argument('--epochs', type=int)
@@ -111,10 +130,15 @@ if __name__ == '__main__':
     # Get input dimension
     if domain == 'audio':
         embedding_shape = (49, 768)
-        embedding_dim = 49 * 768
-    
+        # embedding_dim = 49 * 768
+        embedding_dim = 768
+
     # Initialize model
-    model = FeatureReproducingModel(in_dim=embedding_dim, embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+    if args.surrogate_type == 'linear':
+        model = FeatureReproducingModel(in_dim=embedding_dim, embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+    else:
+        model = TransformerBasedMimicker(embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+
     model.to(args.device)
 
     # Initialize optimizer
@@ -139,7 +163,7 @@ if __name__ == '__main__':
                         if args.num_val_batches is not None and batch_idx == args.num_val_batches - 1: # stop validation after num_val_batches
                             break
 
-                        pbar.set_description(f"INFO - Epoch {epoch}/{args.epochs} - Batch {batch_idx+1}/{args.num_val_batches} - Computing validation performance...")
+                        pbar.set_description(f"INFO - Epoch {epoch+1}/{args.epochs} - Batch {batch_idx+1}/{args.num_val_batches} - Computing validation performance...")
                         if args.dataset_name == 'speech_commands':
                             inputs = batch["input_values"].to(args.device)
                             labels = batch["label"]
@@ -151,14 +175,16 @@ if __name__ == '__main__':
                             register_intermediate=False, 
                             register_init_embedding=True
                         )
-                        init_embeddings = features['feature_projection'].flatten(1).to(args.device)
+                        init_embeddings = features['feature_projection'].to(args.device) #.flatten(1).to(args.device)
                     
                         # Reproduce intermediate features
                         reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
                         
                         # Compute loss and backpropagate
-                        intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].flatten(1).to(args.device), reproduced_intermediate_features)
-                        last_loss = criterion(features[f'layer{args.last_layer}'].flatten(1).to(args.device), reproduced_last_hidden_states)
+                        intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+                        last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
+                        # intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].flatten(1).to(args.device), reproduced_intermediate_features)
+                        # last_loss = criterion(features[f'layer{args.last_layer}'].flatten(1).to(args.device), reproduced_last_hidden_states)
                         val_loss = intermediate_loss + last_loss
                         
                         val_losses['intermediate'].append(intermediate_loss.item())
@@ -167,7 +193,7 @@ if __name__ == '__main__':
 
                         # Do prediction using original classifier
                         if 'wav2vec' in analyzer.__class__.__name__.lower():                    
-                            projected = analyzer.model.projector(reproduced_last_hidden_states.reshape(-1, *embedding_shape)).mean(dim=1)
+                            projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
                             preds.append( analyzer.model.classifier(projected).argmax(1).cpu() )
                             GT_preds.append( analyzer.model(inputs).logits.argmax(1).cpu() )
                             all_labels.append( labels )
@@ -187,7 +213,7 @@ if __name__ == '__main__':
 
                     if best_val_loss > np.mean(val_losses['total']):
                         best_val_loss = np.mean(val_losses['total'])
-                        torch.save(model.state_dict(), os.path.join(save_path, f'mimicer_{model_version}.pt'))
+                        torch.save(model.state_dict(), os.path.join(save_path, f'mimicker_{model_version}.pt'))
                         print(f"New best model saved...")
 
             # Get training batch
@@ -208,13 +234,16 @@ if __name__ == '__main__':
                     register_intermediate=False, 
                     register_init_embedding=True
                 )
-            init_embeddings = features['feature_projection'].flatten(1).to(args.device).requires_grad_()
+            # init_embeddings = features['feature_projection'].flatten(1).to(args.device).requires_grad_()
+            init_embeddings = features['feature_projection'].to(args.device).requires_grad_()
 
             # Reproduce intermediate features
             reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
             # Compute loss and backpropagate
-            intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].flatten(1).to(args.device), reproduced_intermediate_features)
-            last_loss = criterion(features[f'layer{args.last_layer}'].flatten(1).to(args.device), reproduced_last_hidden_states)
+            intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+            last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
+            # intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].flatten(1).to(args.device), reproduced_intermediate_features)
+            # last_loss = criterion(features[f'layer{args.last_layer}'].flatten(1).to(args.device), reproduced_last_hidden_states)
             loss = intermediate_loss + last_loss
             loss.backward()
             # Optimize
@@ -223,7 +252,7 @@ if __name__ == '__main__':
             with torch.no_grad():
                 # Do prediction using original classifier
                 if 'wav2vec' in analyzer.__class__.__name__.lower():                    
-                    projected = analyzer.model.projector(reproduced_last_hidden_states.reshape(-1, *embedding_shape)).mean(dim=1)
+                    projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
                     preds = analyzer.model.classifier(projected).argmax(1).cpu()
                     GT_preds = analyzer.model(inputs).logits.argmax(1).cpu()
                 else:
@@ -239,8 +268,8 @@ if __name__ == '__main__':
             writer.add_scalar('Accuracy/Training', acc.item(), step)
             writer.add_scalar('Accuracy/Training (GT)', GT_acc.item(), step)
 
-            if (step+1) % len(loaders["train"]) == 0:
-                epoch += 1
-
             # Update progress bar
             pbar.set_description(f"INFO - Epoch {epoch+1}/{args.epochs} - Train. loss: {loss.item():.3f} - Val. loss: {val_loss.item():.3f} - Train. acc: {acc.item():.3f} - Val. acc: {val_acc.item():.3f}")
+
+            if (step+1) % len(loaders["train"]) == 0:
+                epoch += 1
