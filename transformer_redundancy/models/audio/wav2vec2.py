@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+from copy import deepcopy
 from ..layerwise import LayerWiseAnalysis
 from transformers import AutoModelForAudioClassification
 
@@ -116,3 +117,30 @@ class Wav2VecForLayerwiseAnalysis(LayerWiseAnalysis):
             else:
                 __z = _op(__z)
         return __z
+    
+    def __average_layers__(self, model, community_filepath: str):
+        # Load community
+        all_communities = torch.load(community_filepath)
+
+        with torch.no_grad():
+            average_layers = []
+            for _community in all_communities['wav2vec2-words']:
+                for c_idx, layer_idx in enumerate(_community):
+                    layer = model.wav2vec2.encoder.layers[layer_idx] # get layer
+                    if c_idx == 0: # initialize new layer dict if first layer in community
+                        new_layer_dict = dict(layer.named_parameters())
+                    else: # add parameters to new layer dict
+                        for n, p in layer.named_parameters():
+                            new_layer_dict[n] += p
+                
+                # Average parameters
+                for k, v in new_layer_dict.items():
+                    new_layer_dict[k] /= len(_community)
+                
+                # Load weights onto layer structure
+                new_layer = deepcopy(layer)
+                new_layer.load_state_dict(new_layer_dict)
+                average_layers.append(new_layer)
+
+            # Replace layers with average layers
+            model.wav2vec2.encoder.layers = torch.nn.ModuleList(average_layers)

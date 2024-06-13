@@ -74,7 +74,7 @@ if __name__ == '__main__':
     # Load environment variables
     load_dotenv()
     login(os.getenv('HF_TOKEN'))
-    os.environ["HF_HOME"] = os.getenv('HF_HOME')
+    # os.environ["HF_HOME"] = os.getenv('HF_HOME')
 
     # Clear pytorch cache
     torch.cuda.empty_cache()
