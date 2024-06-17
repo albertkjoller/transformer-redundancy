@@ -72,7 +72,10 @@ class TransformerBasedMimicker(nn.Module):
 if __name__ == '__main__':
     
     import os
+    from pathlib import Path
     import argparse
+    from collections import OrderedDict
+
     from dotenv import load_dotenv
     from huggingface_hub import login
     from tqdm import tqdm
@@ -120,9 +123,11 @@ if __name__ == '__main__':
 
     # Create save path
     save_path = os.path.join(args.save_path, f'{args.dataset_name}/{args.model_name}')
-    model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_layers=[{args.intermediate_layer}, {args.last_layer}]'
     if args.train_classifier:
-        model_version += '_finetuned'
+        model_version = args.from_pretrained.split("/")[-1].split(".pt")[0].split("mimicker_")[1] + f"_finetuned{args.lr}"
+    else:
+        model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_layers=[{args.intermediate_layer}, {args.last_layer}]_{args.surrogate_type}'
+
 
     os.makedirs(save_path, exist_ok=True)
 
@@ -151,8 +156,14 @@ if __name__ == '__main__':
         for param in model.parameters():
             param.requires_grad = False
             
-    model.to(args.device)
+    if args.train_classifier:
+        model = nn.Sequential(OrderedDict([
+            ("mimicker", model),
+            ("projector", analyzer.model.projector),
+            ("classifier", analyzer.model.classifier),
+        ]))
 
+    model.to(args.device)
 
     # Initialize optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -162,7 +173,7 @@ if __name__ == '__main__':
     num_steps = loaders["train"].__len__() * args.epochs 
     best_val_loss = np.inf
     
-    writer = SummaryWriter(log_dir=os.path.join(save_path, f'logs/{model_version}'))
+    writer = SummaryWriter(log_dir=Path(os.path.join(save_path, f'logs/{model_version}')))
     with tqdm(range(num_steps)) as pbar:
         for step in pbar:
             
@@ -190,10 +201,11 @@ if __name__ == '__main__':
                         )
                         init_embeddings = features['feature_projection'].to(args.device) #.flatten(1).to(args.device)
                     
-                        # Reproduce intermediate features
-                        reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
                         
                         if not args.train_classifier:
+                            # Reproduce intermediate features
+                            reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
+
                             # Compute loss and backpropagate
                             intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
                             last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
@@ -213,8 +225,11 @@ if __name__ == '__main__':
                                 raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
         
                         else:
-                            projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
-                            z = torch.log_softmax(analyzer.model.classifier(projected), dim=1)
+                            # Reproduce intermediate features
+                            reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
+                            # Classify
+                            projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
+                            z = torch.log_softmax(model.classifier(projected), dim=1)
                             val_loss = criterion(z, labels.to(args.device))
                             val_losses['total'].append(val_loss.item())
 
@@ -263,19 +278,21 @@ if __name__ == '__main__':
             # init_embeddings = features['feature_projection'].flatten(1).to(args.device).requires_grad_()
             init_embeddings = features['feature_projection'].to(args.device).requires_grad_()
 
-            # Reproduce intermediate features
-            reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
 
             if not args.train_classifier:
+                # Reproduce intermediate features
+                reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
                 # Compute loss
                 intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
                 last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
                 loss = intermediate_loss + last_loss
 
             else:
+                # Reproduce intermediate features
+                reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
                 # Compute loss
-                projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
-                z = torch.log_softmax(analyzer.model.classifier(projected), dim=1)
+                projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
+                z = torch.log_softmax(model.classifier(projected), dim=1)
                 loss = criterion(z, labels.to(args.device))
             
             # Backpropagate
