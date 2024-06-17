@@ -49,7 +49,7 @@ class FeatureReproducingModel(nn.Module):
         intermediate_hidden_states = self.intermediate_linear_probe(self.relu(self.layer_norm(self.intermediate_representation_encoder(x))))
         last_hidden_states = self.final_linear_probe(self.relu(self.layer_norm(self.final_representation_encoder(intermediate_hidden_states))))
         return intermediate_hidden_states, last_hidden_states
-
+    
 
 class TransformerBasedMimicker(nn.Module):
 
@@ -67,7 +67,7 @@ class TransformerBasedMimicker(nn.Module):
         intermediate_hidden_states = self.intermediate_transformer_layer(x)
         last_hidden_states = self.last_transformer_layer(intermediate_hidden_states)
         return intermediate_hidden_states, last_hidden_states
-    
+
 
 if __name__ == '__main__':
     
@@ -88,6 +88,8 @@ if __name__ == '__main__':
     parser.add_argument('--last-layer', type=int)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--save-path', type=str, default='../experiments', help='Directory to save the bsub files.')
+    parser.add_argument('--train-classifier', action='store_true')
+    parser.add_argument('--from-pretrained', type=str, default=None)
     ### Data parameters ###
     parser.add_argument('--dataset-name', type=str, choices=['speech_commands'])
     parser.add_argument('--processor-name', type=str)
@@ -119,6 +121,9 @@ if __name__ == '__main__':
     # Create save path
     save_path = os.path.join(args.save_path, f'{args.dataset_name}/{args.model_name}')
     model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_layers=[{args.intermediate_layer}, {args.last_layer}]'
+    if args.train_classifier:
+        model_version += '_finetuned'
+
     os.makedirs(save_path, exist_ok=True)
 
     # Get data domain and loaders
@@ -138,12 +143,20 @@ if __name__ == '__main__':
         model = FeatureReproducingModel(in_dim=embedding_dim, embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
     else:
         model = TransformerBasedMimicker(embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
-
+    
+    if args.from_pretrained is not None:
+        assert args.train_classifier, "Model must be trained with a classifier..."
+        model.load_state_dict(torch.load(args.from_pretrained))
+        # Freeze mimicker model
+        for param in model.parameters():
+            param.requires_grad = False
+            
     model.to(args.device)
+
 
     # Initialize optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.MSELoss()
+    criterion = nn.MSELoss() if not args.train_classifier else nn.NLLLoss()
     
     epoch = 0
     num_steps = loaders["train"].__len__() * args.epochs 
@@ -180,36 +193,49 @@ if __name__ == '__main__':
                         # Reproduce intermediate features
                         reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
                         
-                        # Compute loss and backpropagate
-                        intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
-                        last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
-                        # intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].flatten(1).to(args.device), reproduced_intermediate_features)
-                        # last_loss = criterion(features[f'layer{args.last_layer}'].flatten(1).to(args.device), reproduced_last_hidden_states)
-                        val_loss = intermediate_loss + last_loss
+                        if not args.train_classifier:
+                            # Compute loss and backpropagate
+                            intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+                            last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
+                            val_loss = intermediate_loss + last_loss
                         
-                        val_losses['intermediate'].append(intermediate_loss.item())
-                        val_losses['last'].append(last_loss.item())
-                        val_losses['total'].append(val_loss.item())
+                            val_losses['intermediate'].append(intermediate_loss.item())
+                            val_losses['last'].append(last_loss.item())
+                            val_losses['total'].append(val_loss.item())
 
-                        # Do prediction using original classifier
-                        if 'wav2vec' in analyzer.__class__.__name__.lower():                    
-                            projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
-                            preds.append( analyzer.model.classifier(projected).argmax(1).cpu() )
-                            GT_preds.append( analyzer.model(inputs).logits.argmax(1).cpu() )
-                            all_labels.append( labels )
+                            # Do prediction using original classifier
+                            if 'wav2vec' in analyzer.__class__.__name__.lower():                    
+                                projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
+                                preds.append( analyzer.model.classifier(projected).argmax(1).cpu() )
+                                GT_preds.append( analyzer.model(inputs).logits.argmax(1).cpu() )
+                                all_labels.append( labels )
+                            else:
+                                raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+        
                         else:
-                            raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+                            projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
+                            z = torch.log_softmax(analyzer.model.classifier(projected), dim=1)
+                            val_loss = criterion(z, labels.to(args.device))
+                            val_losses['total'].append(val_loss.item())
+
+                            _, _preds = z.topk(k=1)
+                            preds.append(_preds.cpu().reshape(labels.shape))
+                            all_labels.append(labels)
 
                     # Compute accuracy using classifier layer from original model
-                    preds, GT_preds, all_labels = torch.cat(preds), torch.cat(GT_preds), torch.cat(all_labels)
-                    val_acc, val_GT_acc = (preds == all_labels).float().mean(), (GT_preds == all_labels).float().mean()
+                    preds, all_labels = torch.cat(preds), torch.cat(all_labels)
+                    val_acc = (preds == all_labels).float().mean()
 
                     # Store results
                     writer.add_scalar('Loss/Validation (total)', np.mean(val_losses['total']), step)
                     writer.add_scalar('Loss/Validation (intermediate)', np.mean(val_losses['intermediate']), step)
                     writer.add_scalar('Loss/Validation (last)', np.mean(val_losses['last']), step)
                     writer.add_scalar('Accuracy/Validation', val_acc.item(), step)
-                    writer.add_scalar('Accuracy/Validation (GT)', val_GT_acc.item(), step)
+
+                    if not args.train_classifier:
+                        GT_preds = torch.cat(GT_preds)
+                        val_GT_acc = (GT_preds == all_labels).float().mean()
+                        writer.add_scalar('Accuracy/Validation (GT)', val_GT_acc.item(), step)
 
                     if best_val_loss > np.mean(val_losses['total']):
                         best_val_loss = np.mean(val_losses['total'])
@@ -239,34 +265,50 @@ if __name__ == '__main__':
 
             # Reproduce intermediate features
             reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
-            # Compute loss and backpropagate
-            intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
-            last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
-            # intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].flatten(1).to(args.device), reproduced_intermediate_features)
-            # last_loss = criterion(features[f'layer{args.last_layer}'].flatten(1).to(args.device), reproduced_last_hidden_states)
-            loss = intermediate_loss + last_loss
+
+            if not args.train_classifier:
+                # Compute loss
+                intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+                last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
+                loss = intermediate_loss + last_loss
+
+            else:
+                # Compute loss
+                projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
+                z = torch.log_softmax(analyzer.model.classifier(projected), dim=1)
+                loss = criterion(z, labels.to(args.device))
+            
+            # Backpropagate
             loss.backward()
             # Optimize
             optimizer.step()
 
             with torch.no_grad():
-                # Do prediction using original classifier
-                if 'wav2vec' in analyzer.__class__.__name__.lower():                    
-                    projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
-                    preds = analyzer.model.classifier(projected).argmax(1).cpu()
-                    GT_preds = analyzer.model(inputs).logits.argmax(1).cpu()
-                else:
-                    raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")            
+                if not args.train_classifier:
+                    # Do prediction using original classifier
+                    if 'wav2vec' in analyzer.__class__.__name__.lower():                    
+                        projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
+                        preds = analyzer.model.classifier(projected).argmax(1).cpu()
+                        GT_preds = analyzer.model(inputs).logits.argmax(1).cpu()
+                    else:
+                        raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")            
+                
+                    # Compute accuracy using classifier layer from original model
+                    acc, GT_acc = (preds == labels).float().mean(), (GT_preds == labels).float().mean()
 
-                # Compute accuracy using classifier layer from original model
-                acc, GT_acc = (preds == labels).float().mean(), (GT_preds == labels).float().mean()
+                else:
+                    _, preds = z.topk(k=1)
+                    preds = preds.cpu().reshape(labels.shape)
+                    # Compute accuracy using classifier layer from original model
+                    acc = (preds == labels).float().mean()
 
             # Store results
             writer.add_scalar('Loss/Training (total)', loss.item(), step)
-            writer.add_scalar('Loss/Training (intermediate)', intermediate_loss.item(), step)
-            writer.add_scalar('Loss/Training (last)', last_loss.item(), step)
             writer.add_scalar('Accuracy/Training', acc.item(), step)
-            writer.add_scalar('Accuracy/Training (GT)', GT_acc.item(), step)
+            if not args.train_classifier:
+                writer.add_scalar('Loss/Training (intermediate)', intermediate_loss.item(), step)
+                writer.add_scalar('Loss/Training (last)', last_loss.item(), step)
+                writer.add_scalar('Accuracy/Training (GT)', GT_acc.item(), step)
 
             # Update progress bar
             pbar.set_description(f"INFO - Epoch {epoch+1}/{args.epochs} - Train. loss: {loss.item():.3f} - Val. loss: {val_loss.item():.3f} - Train. acc: {acc.item():.3f} - Val. acc: {val_acc.item():.3f}")
