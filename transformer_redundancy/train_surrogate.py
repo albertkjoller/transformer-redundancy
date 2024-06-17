@@ -129,6 +129,10 @@ if __name__ == '__main__':
     else:
         model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_layers=[{args.intermediate_layer}, {args.last_layer}]_{args.surrogate_type}'
 
+    if args.avoid_freeze:
+        assert args.from_pretrained is not None, "Model must be loaded from a pretrained model..."
+        model_version += '_unfrozen'
+
     os.makedirs(save_path, exist_ok=True)
 
     # Get data domain and loaders
