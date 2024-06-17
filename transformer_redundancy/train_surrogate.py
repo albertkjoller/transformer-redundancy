@@ -93,6 +93,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-path', type=str, default='../experiments', help='Directory to save the bsub files.')
     parser.add_argument('--train-classifier', action='store_true')
     parser.add_argument('--from-pretrained', type=str, default=None)
+    parser.add_argument('--avoid-freeze', action='store_true')
     ### Data parameters ###
     parser.add_argument('--dataset-name', type=str, choices=['speech_commands'])
     parser.add_argument('--processor-name', type=str)
@@ -124,10 +125,9 @@ if __name__ == '__main__':
     # Create save path
     save_path = os.path.join(args.save_path, f'{args.dataset_name}/{args.model_name}')
     if args.train_classifier:
-        model_version = args.from_pretrained.split("/")[-1].split(".pt")[0].split("mimicker_")[1] + f"_finetuned{args.lr}"
+        model_version = args.from_pretrained.split("/")[-1].split(".pt")[0].split("mimicker_")[1] + f"_finetuned_lr={args.lr}"
     else:
         model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_layers=[{args.intermediate_layer}, {args.last_layer}]_{args.surrogate_type}'
-
 
     os.makedirs(save_path, exist_ok=True)
 
@@ -152,9 +152,11 @@ if __name__ == '__main__':
     if args.from_pretrained is not None:
         assert args.train_classifier, "Model must be trained with a classifier..."
         model.load_state_dict(torch.load(args.from_pretrained))
-        # Freeze mimicker model
-        for param in model.parameters():
-            param.requires_grad = False
+
+        if not args.avoid_freeze:
+            # Freeze mimicker model
+            for param in model.parameters():
+                param.requires_grad = False
             
     if args.train_classifier:
         model = nn.Sequential(OrderedDict([
@@ -173,7 +175,7 @@ if __name__ == '__main__':
     num_steps = loaders["train"].__len__() * args.epochs 
     best_val_loss = np.inf
     
-    writer = SummaryWriter(log_dir=Path(os.path.join(save_path, f'logs/{model_version}')))
+    writer = SummaryWriter(log_dir=os.path.join(save_path, f'logs/{model_version}'))
     with tqdm(range(num_steps)) as pbar:
         for step in pbar:
             
@@ -314,6 +316,7 @@ if __name__ == '__main__':
                     acc, GT_acc = (preds == labels).float().mean(), (GT_preds == labels).float().mean()
 
                 else:
+                    _, preds = z.topk(k=1)
                     _, preds = z.topk(k=1)
                     preds = preds.cpu().reshape(labels.shape)
                     # Compute accuracy using classifier layer from original model
