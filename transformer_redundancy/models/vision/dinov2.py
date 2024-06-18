@@ -27,7 +27,12 @@ class DinoV2ForLayerwiseAnalysis(LayerWiseAnalysis):
                 self.features[name] = output
         return hook
     
-    def __register_hooks__(self, register_intermediate: bool = False, **kwargs):
+    def get_embeddings(self, name: str):
+        def hook(module, input, output):
+            self.features[name].append(output)
+        return hook
+    
+    def __register_hooks__(self, register_intermediate: bool = False, layers: list = None, register_init_embedding: bool = False, **kwargs):
         self.features = {}
         self._hooks_registed = True
 
@@ -35,6 +40,14 @@ class DinoV2ForLayerwiseAnalysis(LayerWiseAnalysis):
         layer_name = 0
         handles = []
         self._register_intermediate = register_intermediate
+        
+        if layers is None:
+            layers = range(self.num_layers)
+        
+        if register_init_embedding:
+            self.features["feature_projection"] = []
+            handles.append(self.model.dinov2.embeddings.register_forward_hook(self.get_embeddings("feature_projection")))
+
         for layer_idx in range(self.num_layers):
             if register_intermediate:
                 handles.append(self.model.dinov2.encoder.layer[layer_idx].layer_scale2.register_forward_hook(self.get_features(f"layer{layer_name}")))

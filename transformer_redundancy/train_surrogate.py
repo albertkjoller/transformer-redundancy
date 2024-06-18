@@ -87,6 +87,7 @@ if __name__ == '__main__':
     parser.add_argument('--val-every', type=int, default=50)
     parser.add_argument('--num-val-batches', type=int, default=None)
     parser.add_argument('--epochs', type=int)
+    parser.add_argument('--num-steps', type=int, default=None)
     parser.add_argument('--intermediate-layer', type=int)
     parser.add_argument('--last-layer', type=int)
     parser.add_argument('--seed', type=int, default=0)
@@ -95,7 +96,7 @@ if __name__ == '__main__':
     parser.add_argument('--from-pretrained', type=str, default=None)
     parser.add_argument('--avoid-freeze', action='store_true')
     ### Data parameters ###
-    parser.add_argument('--dataset-name', type=str, choices=['speech_commands'])
+    parser.add_argument('--dataset-name', type=str, choices=['speech_commands', 'imagenet-1k'])
     parser.add_argument('--processor-name', type=str)
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--shuffle', action='store_true')
@@ -123,7 +124,7 @@ if __name__ == '__main__':
     torch.cuda.manual_seed(args.seed)
 
     # Create save path
-    save_path = os.path.join(args.save_path, f'{args.dataset_name}/{args.model_name}')
+    save_path = os.path.join(args.save_path, f'{args.dataset_name}/{args.model_name}') if 'dinov2' not in args.model_name else os.path.join(args.save_path, f'{args.dataset_name}/dinov2-g')
     if args.train_classifier:
         model_version = args.from_pretrained.split("/")[-1].split(".pt")[0].split("mimicker_")[1] + f"_finetuned_lr={args.lr}"
     else:
@@ -131,7 +132,7 @@ if __name__ == '__main__':
 
     if args.avoid_freeze:
         assert args.from_pretrained is not None, "Model must be loaded from a pretrained model..."
-        model_version += '_unfrozen'
+        model_version += '_NF'
 
     os.makedirs(save_path, exist_ok=True)
 
@@ -144,8 +145,14 @@ if __name__ == '__main__':
     # Get input dimension
     if domain == 'audio':
         embedding_shape = (49, 768)
-        # embedding_dim = 49 * 768
         embedding_dim = 768
+    elif domain == 'vision':
+        if 'giant' in args.model_name:
+            embedding_dim = 1536
+        elif 'small' in args.model_name:
+            embedding_dim = 384
+        else:
+            embedding_dim = 768
 
     # Initialize model
     if args.surrogate_type == 'linear':
@@ -163,12 +170,22 @@ if __name__ == '__main__':
                 param.requires_grad = False
             
     if args.train_classifier:
-        model = nn.Sequential(OrderedDict([
-            ("mimicker", model),
-            ("projector", analyzer.model.projector),
-            ("classifier", analyzer.model.classifier),
-        ]))
-
+        if domain == 'audio':
+            model = nn.Sequential(OrderedDict([
+                ("mimicker", model),
+                ("projector", analyzer.model.projector),
+                ("classifier", analyzer.model.classifier),
+            ]))
+        elif domain == 'vision':
+            if 'dinov2' in args.model_name:
+                model = nn.Sequential(OrderedDict([
+                    ("mimicker", model),
+                    ("layernorm", analyzer.model.dinov2.layernorm),
+                    ("classifier", analyzer.model.classifier),
+                ]))
+            else:
+                raise NotImplementedError("Vision classifier not implemented...")
+        
     model.to(args.device)
 
     # Initialize optimizer
@@ -176,8 +193,13 @@ if __name__ == '__main__':
     criterion = nn.MSELoss() if not args.train_classifier else nn.NLLLoss()
     
     epoch = 0
-    num_steps = loaders["train"].__len__() * args.epochs 
     best_val_loss = np.inf
+    if args.dataset_name == 'imagenet-1k': # streaming
+        assert args.num_steps is not None, "Number of steps must be defined for ImageNet..."
+        num_steps = args.num_steps
+    else:
+        num_steps = loaders["train"].__len__() * args.epochs 
+    
     
     writer = SummaryWriter(log_dir=os.path.join(save_path, f'logs/{model_version}'))
     with tqdm(range(num_steps)) as pbar:
@@ -197,6 +219,9 @@ if __name__ == '__main__':
                         if args.dataset_name == 'speech_commands':
                             inputs = batch["input_values"].to(args.device)
                             labels = batch["label"]
+                        elif args.dataset_name == 'imagenet-1k':
+                            inputs = {'pixel_values': batch[0].to(args.device)}
+                            labels = batch[1]
 
                         # Extract features
                         features, n_feature_layers = extract_features(
@@ -206,8 +231,7 @@ if __name__ == '__main__':
                             register_init_embedding=True
                         )
                         init_embeddings = features['feature_projection'].to(args.device) #.flatten(1).to(args.device)
-                    
-                        
+                                            
                         if not args.train_classifier:
                             # Reproduce intermediate features
                             reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
@@ -222,19 +246,38 @@ if __name__ == '__main__':
                             val_losses['total'].append(val_loss.item())
 
                             # Do prediction using original classifier
-                            if 'wav2vec' in analyzer.__class__.__name__.lower():                    
+                            all_labels.append( labels )
+                            if domain == 'audio':                  
                                 projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
                                 preds.append( analyzer.model.classifier(projected).argmax(1).cpu() )
                                 GT_preds.append( analyzer.model(inputs).logits.argmax(1).cpu() )
-                                all_labels.append( labels )
+
+                            elif domain == 'vision':
+                                if 'dinov2' in args.model_name:
+                                    z = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
+                                    z = torch.cat([z[:, 0], z[:, 1:].mean(dim=1)], dim=1)
+                                    preds.append( analyzer.model.classifier(z).argmax(1).cpu() ) 
+                                    GT_preds.append( analyzer.model(**inputs).logits.argmax(1).cpu() )
+                                else:
+                                    raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
                             else:
                                 raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
         
                         else:
                             # Reproduce intermediate features
                             reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
+                            
+                            # Do projection
+                            if domain == 'audio':
+                                projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
+                            elif domain == 'vision':
+                                if 'dinov2' in args.model_name:
+                                    projected = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
+                                    projected = torch.cat([projected[:, 0], projected[:, 1:].mean(dim=1)], dim=1)
+                                else:
+                                    raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+                            
                             # Classify
-                            projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
                             z = torch.log_softmax(model.classifier(projected), dim=1)
                             val_loss = criterion(z, labels.to(args.device))
                             val_losses['total'].append(val_loss.item())
@@ -296,8 +339,18 @@ if __name__ == '__main__':
             else:
                 # Reproduce intermediate features
                 reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
+    
+                # Do projection
+                if domain == 'audio':
+                    projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
+                elif domain == 'vision':
+                    if 'dinov2' in args.model_name:
+                        projected = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
+                        projected = torch.cat([projected[:, 0], projected[:, 1:].mean(dim=1)], dim=1)
+                    else:
+                        raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+                
                 # Compute loss
-                projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
                 z = torch.log_softmax(model.classifier(projected), dim=1)
                 loss = criterion(z, labels.to(args.device))
             
@@ -309,13 +362,22 @@ if __name__ == '__main__':
             with torch.no_grad():
                 if not args.train_classifier:
                     # Do prediction using original classifier
-                    if 'wav2vec' in analyzer.__class__.__name__.lower():                    
+                    if domain == 'audio':                  
                         projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
                         preds = analyzer.model.classifier(projected).argmax(1).cpu()
                         GT_preds = analyzer.model(inputs).logits.argmax(1).cpu()
+
+                    elif domain == 'vision':
+                        if 'dinov2' in args.model_name:
+                            z = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
+                            z = torch.cat([z[:, 0], z[:, 1:].mean(dim=1)], dim=1)
+                            preds = analyzer.model.classifier(z).argmax(1).cpu()
+                            GT_preds  = analyzer.model(**inputs).logits.argmax(1).cpu()
+                        else:
+                            raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
                     else:
-                        raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")            
-                
+                        raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+
                     # Compute accuracy using classifier layer from original model
                     acc, GT_acc = (preds == labels).float().mean(), (GT_preds == labels).float().mean()
 
@@ -337,5 +399,5 @@ if __name__ == '__main__':
             # Update progress bar
             pbar.set_description(f"INFO - Epoch {epoch+1}/{args.epochs} - Train. loss: {loss.item():.3f} - Val. loss: {val_loss.item():.3f} - Train. acc: {acc.item():.3f} - Val. acc: {val_acc.item():.3f}")
 
-            if (step+1) % len(loaders["train"]) == 0:
+            if args.dataset_name != 'imagenet-1k' and (step+1) % len(loaders["train"]) == 0:
                 epoch += 1
