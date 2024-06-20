@@ -49,7 +49,23 @@ class FeatureReproducingModel(nn.Module):
         intermediate_hidden_states = self.intermediate_linear_probe(self.relu(self.layer_norm(self.intermediate_representation_encoder(x))))
         last_hidden_states = self.final_linear_probe(self.relu(self.layer_norm(self.final_representation_encoder(intermediate_hidden_states))))
         return intermediate_hidden_states, last_hidden_states
+
+
+class OneLayerFeatureReproducingModel(nn.Module):
+
+    def __init__(self, in_dim: int, embedding_dim: int, hidden_dim: int = 512):
+        super(FeatureReproducingModel, self).__init__()
+        
+        self.final_representation_encoder = nn.Linear(in_dim, hidden_dim)
+        self.final_linear_probe = nn.Linear(hidden_dim, embedding_dim)
+        self.relu = nn.ReLU()
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x):
+        last_hidden_states = self.final_linear_probe(self.relu(self.layer_norm(self.final_representation_encoder(x))))
+        return None, last_hidden_states # None for intermediate hidden states
     
+
 
 class TransformerBasedMimicker(nn.Module):
 
@@ -67,6 +83,20 @@ class TransformerBasedMimicker(nn.Module):
         intermediate_hidden_states = self.intermediate_transformer_layer(x)
         last_hidden_states = self.last_transformer_layer(intermediate_hidden_states)
         return intermediate_hidden_states, last_hidden_states
+
+
+class OneLayerTransformerBasedMimicker(nn.Module):
+
+    def __init__(self, embedding_dim: int, hidden_dim: int = 768, **kwargs):
+        super(TransformerBasedMimicker, self).__init__()
+
+        self.last_transformer_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
+        )
+        
+    def forward(self, x):
+        last_hidden_states = self.last_transformer_layer(x)
+        return None, last_hidden_states # None for intermediate hidden states
 
 
 if __name__ == '__main__':
@@ -88,8 +118,8 @@ if __name__ == '__main__':
     parser.add_argument('--num-val-batches', type=int, default=None)
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--num-steps', type=int, default=None)
-    parser.add_argument('--intermediate-layer', type=int)
-    parser.add_argument('--last-layer', type=int)
+    parser.add_argument('--intermediate-layer', type=int, default=None)
+    parser.add_argument('--last-layer', type=int, default=None)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--save-path', type=str, default='../experiments', help='Directory to save the bsub files.')
     parser.add_argument('--train-classifier', action='store_true')
@@ -126,7 +156,10 @@ if __name__ == '__main__':
     # Create save path
     save_path = os.path.join(args.save_path, f'{args.dataset_name}/{args.model_name}') if 'dinov2' not in args.model_name else os.path.join(args.save_path, f'{args.dataset_name}/dinov2-g')
     if args.train_classifier:
-        model_version = args.from_pretrained.split("/")[-1].split(".pt")[0].split("mimicker_")[1] + f"_finetuned_lr={args.lr}"
+        if args.from_pretrained is not None:
+            model_version = args.from_pretrained.split("/")[-1].split(".pt")[0].split("mimicker_")[1] + f"_finetuned_lr={args.lr}"
+        else:
+            model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_{args.surrogate_type}_finetuned_lr={args.lr}_NP'
     else:
         model_version = f'hidden_dim={args.hidden_dim}_lr={args.lr}_bs={args.batch_size}_layers=[{args.intermediate_layer}, {args.last_layer}]_{args.surrogate_type}'
 
@@ -155,11 +188,19 @@ if __name__ == '__main__':
             embedding_dim = 768
 
     # Initialize model
-    if args.surrogate_type == 'linear':
-        model = FeatureReproducingModel(in_dim=embedding_dim, embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
-    else:
-        model = TransformerBasedMimicker(embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
-    
+    if args.intermediate_layer is not None: # to train a representation intermediate in the transformer stack
+        if args.surrogate_type == 'linear':
+            model = FeatureReproducingModel(in_dim=embedding_dim, embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+        else:
+            model = TransformerBasedMimicker(embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+    elif args.last_layer is not None: # to train a representation at the last layer of the transformer stack
+        if args.surrogate_type == 'linear':
+            model = OneLayerFeatureReproducingModel(in_dim=embedding_dim, embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+        else:
+            model = OneLayerTransformerBasedMimicker(embedding_dim=embedding_dim, hidden_dim=args.hidden_dim)
+    else: # to only finetune the classifier
+        pass
+
     if args.from_pretrained is not None:
         assert args.train_classifier, "Model must be trained with a classifier..."
         model.load_state_dict(torch.load(args.from_pretrained))
@@ -170,22 +211,25 @@ if __name__ == '__main__':
                 param.requires_grad = False
             
     if args.train_classifier:
+        if args.last_layer is not None:
+            _elements = [("mimicker", model)]
+        else:
+            _elements = []
+
         if domain == 'audio':
-            model = nn.Sequential(OrderedDict([
-                ("mimicker", model),
-                ("projector", analyzer.model.projector),
-                ("classifier", analyzer.model.classifier),
-            ]))
+            _elements += [("projector", analyzer.model.projector), ("classifier", analyzer.model.classifier)]
+            model = nn.Sequential(OrderedDict(_elements))
+
         elif domain == 'vision':
             if 'dinov2' in args.model_name:
-                model = nn.Sequential(OrderedDict([
-                    ("mimicker", model),
-                    ("layernorm", analyzer.model.dinov2.layernorm),
-                    ("classifier", analyzer.model.classifier),
-                ]))
+                _elements += [("layernorm", analyzer.model.dinov2.layernorm), ("classifier", analyzer.model.classifier)]
+                model = nn.Sequential(OrderedDict(_elements))
+            
             else:
                 raise NotImplementedError("Vision classifier not implemented...")
-        
+        else:
+            raise NotImplementedError("Domain not implemented...")
+    
     model.to(args.device)
 
     # Initialize optimizer
@@ -226,22 +270,25 @@ if __name__ == '__main__':
                         # Extract features
                         features, n_feature_layers = extract_features(
                             inputs, analyzer, 
-                            layers=[args.intermediate_layer, args.last_layer],
+                            layers=[args.intermediate_layer, args.last_layer] if args.intermediate_layer is not None else [args.last_layer] if args.last_layer is not None else [],
                             register_intermediate=False, 
                             register_init_embedding=True
                         )
-                        init_embeddings = features['feature_projection'].to(args.device) #.flatten(1).to(args.device)
+                        init_embeddings = features['feature_projection'].to(args.device)
                                             
                         if not args.train_classifier:
                             # Reproduce intermediate features
                             reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
 
-                            # Compute loss and backpropagate
-                            intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+                            # Compute loss and backpropagate    
                             last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
-                            val_loss = intermediate_loss + last_loss
-                        
-                            val_losses['intermediate'].append(intermediate_loss.item())
+                            val_loss = last_loss
+
+                            if args.intermediate_layer is not None:
+                                intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+                                val_loss += intermediate_loss
+                                val_losses['intermediate'].append(intermediate_loss.item())
+
                             val_losses['last'].append(last_loss.item())
                             val_losses['total'].append(val_loss.item())
 
@@ -265,8 +312,11 @@ if __name__ == '__main__':
         
                         else:
                             # Reproduce intermediate features
-                            reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
-                            
+                            if 'mimicker' in [n for n, p in model.named_children()]:
+                                reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
+                            else:
+                                reproduced_last_hidden_states = init_embeddings
+
                             # Do projection
                             if domain == 'audio':
                                 projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
@@ -291,8 +341,10 @@ if __name__ == '__main__':
                     val_acc = (preds == all_labels).float().mean()
 
                     # Store results
+                    if args.intermediate_layer is not None:
+                        writer.add_scalar('Loss/Validation (intermediate)', np.mean(val_losses['intermediate']), step)
+    
                     writer.add_scalar('Loss/Validation (total)', np.mean(val_losses['total']), step)
-                    writer.add_scalar('Loss/Validation (intermediate)', np.mean(val_losses['intermediate']), step)
                     writer.add_scalar('Loss/Validation (last)', np.mean(val_losses['last']), step)
                     writer.add_scalar('Accuracy/Validation', val_acc.item(), step)
 
@@ -320,11 +372,10 @@ if __name__ == '__main__':
             with torch.no_grad():
                 features, n_feature_layers = extract_features(
                     inputs, analyzer, 
-                    layers=[args.intermediate_layer, args.last_layer],
+                    layers=[args.intermediate_layer, args.last_layer] if args.intermediate_layer is not None else [args.last_layer] if args.last_layer is not None else [],
                     register_intermediate=False, 
                     register_init_embedding=True
                 )
-            # init_embeddings = features['feature_projection'].flatten(1).to(args.device).requires_grad_()
             init_embeddings = features['feature_projection'].to(args.device).requires_grad_()
 
 
@@ -332,13 +383,18 @@ if __name__ == '__main__':
                 # Reproduce intermediate features
                 reproduced_intermediate_features, reproduced_last_hidden_states = model(init_embeddings)
                 # Compute loss
-                intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
                 last_loss = criterion(features[f'layer{args.last_layer}'].to(args.device), reproduced_last_hidden_states)
-                loss = intermediate_loss + last_loss
+                loss = last_loss
+                if args.intermediate_layer is not None:
+                    intermediate_loss = criterion(features[f'layer{args.intermediate_layer}'].to(args.device), reproduced_intermediate_features)
+                    loss += intermediate_loss
 
             else:
                 # Reproduce intermediate features
-                reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
+                if 'mimicker' in [n for n, p in model.named_children()]:
+                    reproduced_intermediate_features, reproduced_last_hidden_states = model.mimicker(init_embeddings)
+                else:
+                    reproduced_last_hidden_states = init_embeddings
     
                 # Do projection
                 if domain == 'audio':
@@ -391,8 +447,10 @@ if __name__ == '__main__':
             # Store results
             writer.add_scalar('Loss/Training (total)', loss.item(), step)
             writer.add_scalar('Accuracy/Training', acc.item(), step)
+
             if not args.train_classifier:
-                writer.add_scalar('Loss/Training (intermediate)', intermediate_loss.item(), step)
+                if args.intermediate_layer is not None:
+                    writer.add_scalar('Loss/Training (intermediate)', intermediate_loss.item(), step)
                 writer.add_scalar('Loss/Training (last)', last_loss.item(), step)
                 writer.add_scalar('Accuracy/Training (GT)', GT_acc.item(), step)
 
