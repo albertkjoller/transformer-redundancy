@@ -54,7 +54,7 @@ class FeatureReproducingModel(nn.Module):
 class OneLayerFeatureReproducingModel(nn.Module):
 
     def __init__(self, in_dim: int, embedding_dim: int, hidden_dim: int = 512):
-        super(FeatureReproducingModel, self).__init__()
+        super(OneLayerFeatureReproducingModel, self).__init__()
         
         self.final_representation_encoder = nn.Linear(in_dim, hidden_dim)
         self.final_linear_probe = nn.Linear(hidden_dim, embedding_dim)
@@ -88,7 +88,7 @@ class TransformerBasedMimicker(nn.Module):
 class OneLayerTransformerBasedMimicker(nn.Module):
 
     def __init__(self, embedding_dim: int, hidden_dim: int = 768, **kwargs):
-        super(TransformerBasedMimicker, self).__init__()
+        super(OneLayerTransformerBasedMimicker, self).__init__()
 
         self.last_transformer_layer = nn.TransformerEncoderLayer(
             d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
