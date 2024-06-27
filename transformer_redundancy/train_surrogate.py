@@ -73,10 +73,10 @@ class TransformerBasedMimicker(nn.Module):
         super(TransformerBasedMimicker, self).__init__()
 
         self.intermediate_transformer_layer = nn.TransformerEncoderLayer(
-            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
+            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu', batch_first=True,
         )
         self.last_transformer_layer = nn.TransformerEncoderLayer(
-            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
+            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu', batch_first=True,
         )
         
     def forward(self, x):
@@ -177,15 +177,7 @@ if __name__ == '__main__':
 
     # Get input dimension
     if domain == 'audio':
-        embedding_shape = (49, 768)
-        embedding_dim = 768
-    elif domain == 'vision':
-        if 'giant' in args.model_name:
-            embedding_dim = 1536
-        elif 'small' in args.model_name:
-            embedding_dim = 384
-        else:
-            embedding_dim = 768
+        embedding_dim = 1024 if 'large' in args.model_name else 768
 
     # Initialize model
     if args.intermediate_layer is not None: # to train a representation intermediate in the transformer stack
@@ -201,6 +193,7 @@ if __name__ == '__main__':
     else: # to only finetune the classifier
         pass
 
+    # Setup mimicking model
     if args.from_pretrained is not None:
         assert args.train_classifier, "Model must be trained with a classifier..."
         model.load_state_dict(torch.load(args.from_pretrained))
@@ -219,31 +212,18 @@ if __name__ == '__main__':
         if domain == 'audio':
             _elements += [("projector", analyzer.model.projector), ("classifier", analyzer.model.classifier)]
             model = nn.Sequential(OrderedDict(_elements))
-
-        elif domain == 'vision':
-            if 'dinov2' in args.model_name:
-                _elements += [("layernorm", analyzer.model.dinov2.layernorm), ("classifier", analyzer.model.classifier)]
-                model = nn.Sequential(OrderedDict(_elements))
-            
-            else:
-                raise NotImplementedError("Vision classifier not implemented...")
         else:
             raise NotImplementedError("Domain not implemented...")
-    
     model.to(args.device)
 
     # Initialize optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss() if not args.train_classifier else nn.NLLLoss()
     
+    
     epoch = 0
     best_val_loss = np.inf
-    if args.dataset_name == 'imagenet-1k': # streaming
-        assert args.num_steps is not None, "Number of steps must be defined for ImageNet..."
-        num_steps = args.num_steps
-    else:
-        num_steps = loaders["train"].__len__() * args.epochs 
-    
+    num_steps = loaders["train"].__len__() * args.epochs 
     
     writer = SummaryWriter(log_dir=os.path.join(save_path, f'logs/{model_version}'))
     with tqdm(range(num_steps)) as pbar:
@@ -298,15 +278,6 @@ if __name__ == '__main__':
                                 projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
                                 preds.append( analyzer.model.classifier(projected).argmax(1).cpu() )
                                 GT_preds.append( analyzer.model(inputs).logits.argmax(1).cpu() )
-
-                            elif domain == 'vision':
-                                if 'dinov2' in args.model_name:
-                                    z = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
-                                    z = torch.cat([z[:, 0], z[:, 1:].mean(dim=1)], dim=1)
-                                    preds.append( analyzer.model.classifier(z).argmax(1).cpu() ) 
-                                    GT_preds.append( analyzer.model(**inputs).logits.argmax(1).cpu() )
-                                else:
-                                    raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
                             else:
                                 raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
         
@@ -320,12 +291,8 @@ if __name__ == '__main__':
                             # Do projection
                             if domain == 'audio':
                                 projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
-                            elif domain == 'vision':
-                                if 'dinov2' in args.model_name:
-                                    projected = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
-                                    projected = torch.cat([projected[:, 0], projected[:, 1:].mean(dim=1)], dim=1)
-                                else:
-                                    raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+                            else:
+                                raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
                             
                             # Classify
                             z = torch.log_softmax(model.classifier(projected), dim=1)
@@ -399,12 +366,8 @@ if __name__ == '__main__':
                 # Do projection
                 if domain == 'audio':
                     projected = model.projector(reproduced_last_hidden_states).mean(dim=1)
-                elif domain == 'vision':
-                    if 'dinov2' in args.model_name:
-                        projected = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
-                        projected = torch.cat([projected[:, 0], projected[:, 1:].mean(dim=1)], dim=1)
-                    else:
-                        raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
+                else:
+                    raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
                 
                 # Compute loss
                 z = torch.log_softmax(model.classifier(projected), dim=1)
@@ -422,15 +385,6 @@ if __name__ == '__main__':
                         projected = analyzer.model.projector(reproduced_last_hidden_states).mean(dim=1)
                         preds = analyzer.model.classifier(projected).argmax(1).cpu()
                         GT_preds = analyzer.model(inputs).logits.argmax(1).cpu()
-
-                    elif domain == 'vision':
-                        if 'dinov2' in args.model_name:
-                            z = analyzer.model.dinov2.layernorm(reproduced_last_hidden_states)
-                            z = torch.cat([z[:, 0], z[:, 1:].mean(dim=1)], dim=1)
-                            preds = analyzer.model.classifier(z).argmax(1).cpu()
-                            GT_preds  = analyzer.model(**inputs).logits.argmax(1).cpu()
-                        else:
-                            raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
                     else:
                         raise NotImplementedError(f"Validation accuracy not implemented for {analyzer.__class__.__name__}...")
 
@@ -456,6 +410,5 @@ if __name__ == '__main__':
 
             # Update progress bar
             pbar.set_description(f"INFO - Epoch {epoch+1}/{args.epochs} - Train. loss: {loss.item():.3f} - Val. loss: {val_loss.item():.3f} - Train. acc: {acc.item():.3f} - Val. acc: {val_acc.item():.3f}")
-
             if args.dataset_name != 'imagenet-1k' and (step+1) % len(loaders["train"]) == 0:
                 epoch += 1
