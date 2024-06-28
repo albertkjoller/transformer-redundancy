@@ -91,7 +91,7 @@ class OneLayerTransformerBasedMimicker(nn.Module):
         super(OneLayerTransformerBasedMimicker, self).__init__()
 
         self.last_transformer_layer = nn.TransformerEncoderLayer(
-            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu'
+            d_model=embedding_dim, nhead=8, dim_feedforward=hidden_dim, activation='relu', batch_first=True,
         )
         
     def forward(self, x):

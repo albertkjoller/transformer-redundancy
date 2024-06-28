@@ -77,12 +77,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run Visual Transformer results.')
     ### Experiment parameters ###
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--save-path', type=str, default='../experiments', help='Directory to save the bsub files.')
     ### Data parameters ###
-    parser.add_argument('--dataset-name', type=str, choices=['speech_commands', 'imagenet-1k'])
-    parser.add_argument('--processor-name', type=str)
-    parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--shuffle', action='store_true')
+    parser.add_argument('--dataset-name', type=str, choices=['speech_commands'])
+    parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--num-proc', type=int, default=1)
     ### Model parameters ###
     parser.add_argument('--model-name', type=str)
@@ -113,7 +110,7 @@ if __name__ == '__main__':
     # Extract model paths
     meta_info = {}
     for training_procedure in ['mimicker', 'non_mimicker']:
-        for model_type in ['linear']:
+        for model_type in ['transformer']:
             for hidden_dim in args.hidden_dims:
                 for n_layers in [1, 2]:
                     model_path = EXP_PATH / f"{training_procedure}_{model_type}_{n_layers}layer_hidden_dim={hidden_dim}.pt"
