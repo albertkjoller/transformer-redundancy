@@ -107,19 +107,18 @@ if __name__ == '__main__':
     EXP_PATH = Path(args.mimicker_model_folder) / args.model_name
     embedding_dim = 1024 if 'large' in args.model_name else 768
 
-    # Extract model paths
+    # Add original model
     meta_info = {}
+    meta_info[Path(args.model_folder) / args.model_name] = {'embedding_dim': None, 'n_layers': None, 'hidden_dim': None, 'model_type': None}
+    # Extract model paths
     for training_procedure in ['mimicker', 'non_mimicker']:
-        for model_type in ['transformer']:
+        for model_type in ['linear', 'transformer']:
             for hidden_dim in args.hidden_dims:
                 for n_layers in [1, 2]:
                     model_path = EXP_PATH / f"{training_procedure}_{model_type}_{n_layers}layer_hidden_dim={hidden_dim}.pt"
                     
                     # Store meta info
                     meta_info[model_path] = {'embedding_dim': embedding_dim, 'n_layers': n_layers, 'hidden_dim': hidden_dim, 'model_type': model_type}
-
-    # Add original model
-    meta_info[Path(args.model_folder) / args.model_name] = {'embedding_dim': None, 'n_layers': None, 'hidden_dim': None, 'model_type': None}
 
     # Setup results storage
     num_params = {}
@@ -145,7 +144,7 @@ if __name__ == '__main__':
                 # Set up timing
                 starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
-                for i in range(100): # GPU warm-up
+                for i in range(1000): # GPU warm-up
                     _ = model(torch.randn(1, 16000).to(args.device))
 
                 for batch in tqdm(loaders['test'], desc=f"Testing {model_path.name}"): # num_batches is repetitions
