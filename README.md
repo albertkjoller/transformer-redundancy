@@ -5,14 +5,19 @@ The repository contains code used in the paper *"How Redundant Is the Transforme
 
 ---
 
-We provide code for extracting layer-wise features for several Transformer-based networks, including `wav2vec2`, `wavLM`, `dinov2`, etc.. See ```transformer_redundancy/methods``` for similarity metric, including CKA, mutual kNN and Procrustes similarity
-
 ### Experiments
-- Layer-wise analyses in ```transformer_redundancy/run.py```.
-- Knowledge-distillation with mimicking layers trains with ```transformer_redundancy/train_surrogate.py```.
+
+We provide code for extracting layer-wise features for several Transformer-based networks, including `wav2vec2`, `wavLM`, `dinov2`, etc.. 
+
+- Similarity metrics including CKA, mutual kNN and Procrustes similarity found in ```transformer_redundancy/methods```.
+- Layer-wise analyses are performed with ```transformer_redundancy/run.py```.
+- Knowledge-distillation with mimicking layers runs with ```transformer_redundancy/train_surrogate.py```.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/2db60169-ea93-423b-803a-56bded7dcc6b" alt="main-result" style="width:85%;"/>
+</p>
 
 --- 
-
 
 ### Citation
 ```
